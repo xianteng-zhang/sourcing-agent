@@ -1,0 +1,6 @@
+# Streamlit 主题配置:蓝色电商风
+[theme]
+primaryColor = "#2563EB"            # 主色(按钮、强调、链接)—— 电商蓝
+backgroundColor = "#F8FAFC"         # 页面背景 —— 极浅灰白
+secondaryBackgroundColor = "#EEF2FF" # 侧边栏/卡片背景 —— 浅蓝
+textColor = "#0F172A"               # 正文文字 —— 深蓝黑
