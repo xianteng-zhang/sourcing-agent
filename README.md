@@ -1,4 +1,4 @@
-# 🛒 product-research — 跨境电商选品 + 上架 Agent
+# 🛒 sourcing-agent — 跨境电商选品 + 上架 Agent
 
 基于 LangGraph + 大语言模型的跨境电商选品 + 上架 Agent。从商品评论中自动挖掘**卖点、痛点、关键词和竞品差异**,并生成合规的多语言 Listing 上架文案。
 

@@ -1,4 +1,4 @@
-"""选品调研 Agent — Streamlit 界面。
+"""选品与上架 Agent — Streamlit 界面。
 
 用法:streamlit run app.py
 """
@@ -15,15 +15,15 @@ from competitor_compare import run_compare
 from review_miner import run_review_mining
 from trend_analyzer import get_trends, trend_summary
 
-st.set_page_config(page_title="跨境电商选品调研 Agent", page_icon="🛒", layout="wide")
+st.set_page_config(page_title="跨境电商选品与上架 Agent", page_icon="🛒", layout="wide")
 
 # ---- 侧边栏 ----
 with st.sidebar:
-    st.markdown("## 🛒 选品调研 Agent")
-    st.markdown("跨境电商评论分析 · 竞品对比 · 趋势研判")
+    st.markdown("## 🛒 选品与上架 Agent")
+    st.markdown("选品 Agent · 评论分析 · 竞品对比 · 趋势研判")
     st.divider()
     st.markdown("**功能**")
-    st.markdown("- 📊 评论挖掘\n- ⚔️ 竞品对比\n- 📈 趋势分析\n- 📚 历史记录")
+    st.markdown("- 🤖 选品 Agent\n- 📊 评论挖掘\n- ⚔️ 竞品对比\n- 📈 趋势分析\n- 📚 历史记录")
     st.divider()
     st.markdown("**🔌 评论抓取扩展**")
     st.markdown("自研浏览器扩展,自动抓取亚马逊评论导出 CSV。")
@@ -41,8 +41,8 @@ with st.sidebar:
     st.divider()
     st.caption("数据来自商品评论 CSV,支持中英文、任意导出格式。")
 
-st.title("🛒 跨境电商选品调研 Agent")
-st.caption("评论挖掘 + 竞品对比 + 趋势分析,帮你看清「什么好卖、值不值得做」")
+st.title("🛒 跨境电商选品与上架 Agent")
+st.caption("选品 Agent + 评论挖掘 + 竞品对比 + 趋势分析,帮你看清「什么好卖、值不值得做」")
 
 tab_mine, tab_agent, tab_compare, tab_trend, tab_history = st.tabs(["📊 评论挖掘", "🤖 选品 Agent", "⚔️ 竞品对比", "📈 趋势分析", "📚 历史记录"])
 
