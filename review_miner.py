@@ -136,11 +136,14 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_reviews_csv(csv_path: str) -> pd.DataFrame:
-    """读取评论 CSV,自动探测编码,返回标准化后的 DataFrame(含 review、rating 两列)。"""
+    """读取评论 CSV,自动探测编码,返回标准化后的 DataFrame(含 review、rating 两列)。
+
+    以 # 开头的行会被当作注释跳过(用于承载官方星级分布等元数据)。
+    """
     df = None
     for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "latin-1"):
         try:
-            df = pd.read_csv(csv_path, encoding=encoding)
+            df = pd.read_csv(csv_path, encoding=encoding, comment="#")
             break
         except (UnicodeDecodeError, UnicodeError):
             continue
@@ -150,6 +153,28 @@ def read_reviews_csv(csv_path: str) -> pd.DataFrame:
     df = _normalize_columns(df)
     df = df[df["review"].notna() & (df["review"] != "") & (df["review"] != "nan")]
     return df.reset_index(drop=True)
+
+
+def read_reviews_meta(csv_path: str) -> dict:
+    """读取 CSV 里以 # 开头的元数据行(如「# 平均分=4.6 总评数=838 5星=80%」),返回 dict。"""
+    meta: dict = {}
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "latin-1"):
+        try:
+            with open(csv_path, "r", encoding=encoding) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#"):
+                        for part in line.lstrip("#").split():
+                            if "=" in part:
+                                k, v = part.split("=", 1)
+                                meta[k] = v
+                        break
+                    elif line:
+                        break
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return meta
 
 
 def compute_stats(df: pd.DataFrame) -> dict[str, Any]:
@@ -215,9 +240,24 @@ def analyze_reviews(
     return results
 
 
-def generate_report(batch_results: list[dict], llm) -> str:
+def generate_report(batch_results: list[dict], llm, meta: dict | None = None) -> str:
     """汇总分批结果,生成最终 Markdown 选品报告。"""
     aggregated = json.dumps(batch_results, ensure_ascii=False, indent=2)
+
+    # 若抓取时带回了官方星级分布(基于全部评论),优先采信,拼到最前面
+    if meta and (meta.get("平均分") or meta.get("总评数")):
+        parts = []
+        if meta.get("平均分"):
+            parts.append(f"平均分 {meta['平均分']}")
+        if meta.get("总评数"):
+            parts.append(f"总评数 {meta['总评数']}")
+        dist = [f"{k} {v}" for k, v in meta.items() if "星" in k]
+        if dist:
+            parts.append("星级分布 " + "、".join(dist))
+        aggregated = (
+            "[官方口碑数据(基于全部评论,比样本更权威,请优先采信)]\n" + "、".join(parts) + "\n\n" + aggregated
+        )
+
     resp = llm.invoke([
         SystemMessage(content=SUMMARY_SYSTEM),
         HumanMessage(content=summary_prompt(aggregated)),
@@ -234,7 +274,8 @@ def run_review_mining(
 ) -> dict[str, Any]:
     """一键运行评论挖掘:读 CSV → 统计 → 分批分析 → 生成报告。"""
     df = read_reviews_csv(csv_path)
+    meta = read_reviews_meta(csv_path)
     stats = compute_stats(df)
     batch_results = analyze_reviews(df, llm, batch_size, max_reviews, progress)
-    report = generate_report(batch_results, llm)
-    return {"stats": stats, "report": report, "review_count": int(len(df))}
+    report = generate_report(batch_results, llm, meta)
+    return {"stats": stats, "report": report, "review_count": int(len(df)), "meta": meta}

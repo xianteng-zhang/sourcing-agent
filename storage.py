@@ -15,13 +15,14 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """建表(不存在才建)。"""
+    """建表(不存在才建),并为旧库补齐 type 字段。"""
     conn = _connect()
     try:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS analysis_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL DEFAULT '评论挖掘',
                 title TEXT NOT NULL,
                 review_count INTEGER,
                 avg_rating REAL,
@@ -31,6 +32,12 @@ def init_db() -> None:
             )
             """
         )
+        # 迁移:旧表若缺 type 字段则补上
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(analysis_history)")]
+        if "type" not in cols:
+            conn.execute(
+                "ALTER TABLE analysis_history ADD COLUMN type TEXT NOT NULL DEFAULT '评论挖掘'"
+            )
         conn.commit()
     finally:
         conn.close()
@@ -42,16 +49,17 @@ def save_analysis(
     avg_rating: float | None,
     stats: dict,
     report: str,
+    type: str = "评论挖掘",
 ) -> int:
-    """保存一次分析,返回记录 id。"""
+    """保存一次分析,返回记录 id。type 用于分类:评论挖掘 / 竞品对比 / 选品Agent。"""
     init_db()
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _connect()
     try:
         cur = conn.execute(
-            "INSERT INTO analysis_history (title, review_count, avg_rating, stats_json, report, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (title, review_count, avg_rating, json.dumps(stats, ensure_ascii=False), report, created_at),
+            "INSERT INTO analysis_history (type, title, review_count, avg_rating, stats_json, report, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (type, title, review_count, avg_rating, json.dumps(stats, ensure_ascii=False), report, created_at),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -65,7 +73,7 @@ def list_history(limit: int = 100) -> list[dict]:
     conn = _connect()
     try:
         rows = conn.execute(
-            "SELECT id, title, review_count, avg_rating, created_at "
+            "SELECT id, type, title, review_count, avg_rating, created_at "
             "FROM analysis_history ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
