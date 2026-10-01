@@ -28,12 +28,12 @@ MAX_COMPLIANCE_RETRIES = 3
 
 
 def generate_listing(
-    sell_points: str,
-    product_category: str = "",
+    competitor_insights: str,
+    my_product_specs: str = "",
     llm=None,
     max_retries: int = MAX_COMPLIANCE_RETRIES,
 ) -> dict:
-    """生成亚马逊 Listing,并用确定性闸门做「生成 → 拦截 → 重写」闭环。
+    """根据竞品评论洞察 + 卖家产品规格生成 Listing,并用确定性闸门做「生成 → 拦截 → 重写」闭环。
 
     返回:
         {"text": 最终文案, "attempts": 实际轮次,
@@ -47,7 +47,7 @@ def generate_listing(
             SystemMessage(content=LISTING_SYSTEM),
             HumanMessage(
                 content=listing_prompt(
-                    sell_points, product_category, format_violations(violations)
+                    competitor_insights, my_product_specs, format_violations(violations)
                 )
             ),
         ])

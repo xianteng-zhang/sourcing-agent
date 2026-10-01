@@ -141,13 +141,28 @@ with tab_mine:
 
 # ---------------- 选品 Agent ----------------
 with tab_agent:
-    st.header("选品 Agent:一句话,自动完成选品分析 + Listing 生成")
-    st.write("上传评论 CSV,Agent 会**自主规划**流程:先挖卖点痛点,再生成上架文案,最后合规审查。")
+    st.header("选品 Agent:竞品评论 → 我的 Listing")
+    st.write("上传**竞品**的评论 CSV,Agent 分析竞品的卖点/痛点/关键词,结合你填的产品规格,生成**你产品**的 Listing。")
 
-    agent_csv = st.file_uploader("上传评论 CSV", type=["csv"], key="agent_csv")
+    agent_csv = st.file_uploader("上传竞品评论 CSV", type=["csv"], key="agent_csv")
+
+    st.markdown("**我的产品规格**(可选,硬参数,不填则对应处标【待填写】)")
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        spec_category = st.text_input("品类", placeholder="例如:男士慢跑裤 / 笔记本电脑")
+        spec_material = st.text_input("材质", placeholder="例如:92%棉 8%氨纶")
+    with sc2:
+        spec_weight = st.text_input("重量", placeholder="例如:320g / 1.55千克")
+        spec_cert = st.text_input("认证", placeholder="例如:FDA / 能源之星 / OEKO-TEX")
+    spec_detail = st.text_area(
+        "完整技术规格(可选,可粘贴详细参数,每行「参数名:参数值」)",
+        placeholder="处理器:Intel N150(4核,3.6GHz)\n内存:8GB LPDDR5\n显示器:15.6英寸 FHD 1920x1080\n无线:Wi-Fi 6,蓝牙5.2\n端口:2x USB-A,1x USB-C,1x HDMI\n尺寸:359.2 x 234 x 17.9 毫米\n颜色:霜蓝色",
+        height=160,
+    )
+
     user_request = st.text_input(
         "你的需求(可选,留空则用默认流程)",
-        placeholder="例如:重点分析差评原因,并生成日语版 Listing",
+        placeholder="例如:重点分析竞品差评原因,并生成日语版 Listing",
     )
 
     if agent_csv and st.button("🚀 启动 Agent", type="primary"):
@@ -168,7 +183,22 @@ with tab_agent:
                     process_lines.append(f"✅ `{tool}` 完成")
                 process_box.markdown("\n\n".join(process_lines))
 
-            result = run_agent_stream(csv_path, user_request, llm, on_step)
+            spec_parts = []
+            for label, val in [
+                ("品类", spec_category), ("材质", spec_material),
+                ("重量", spec_weight), ("认证", spec_cert),
+            ]:
+                if val and val.strip():
+                    spec_parts.append(f"{label}:{val.strip()}")
+            if spec_detail and spec_detail.strip():
+                spec_parts.append("详细规格:\n" + spec_detail.strip())
+            my_specs = "\n".join(spec_parts)
+
+            full_request = user_request
+            if my_specs:
+                full_request = f"{user_request or '请分析竞品并生成我产品的 Listing'}\n\n我的产品规格:\n{my_specs}"
+
+            result = run_agent_stream(csv_path, full_request, llm, on_step)
 
             # 完整过程(含每步详情,折叠)
             if result.get("steps"):
