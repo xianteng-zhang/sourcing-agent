@@ -1,5 +1,8 @@
 # 🛒 sourcing-agent — 跨境电商选品 + 上架 Agent
 
+[![CI](https://github.com/xianteng-zhang/sourcing-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/xianteng-zhang/sourcing-agent/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+
 基于 LangGraph + 大语言模型的跨境电商选品 + 上架 Agent。从商品评论中自动挖掘**卖点、痛点、关键词和竞品差异**,并生成合规的多语言 Listing 上架文案。
 
 ## 功能一览
