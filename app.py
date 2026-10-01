@@ -194,11 +194,8 @@ with tab_agent:
                 spec_parts.append("详细规格:\n" + spec_detail.strip())
             my_specs = "\n".join(spec_parts)
 
-            full_request = user_request
-            if my_specs:
-                full_request = f"{user_request or '请分析竞品并生成我产品的 Listing'}\n\n我的产品规格:\n{my_specs}"
-
-            result = run_agent_stream(csv_path, full_request, llm, on_step)
+            # 规格通过闭包注入 Agent,不拼进对话 —— 避免模型漏抄/截断后静默降级
+            result = run_agent_stream(csv_path, user_request, llm, on_step, my_specs)
 
             # 完整过程(含每步详情,折叠)
             if result.get("steps"):

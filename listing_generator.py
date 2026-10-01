@@ -1,13 +1,16 @@
 """Listing 生成、合规审查、关键词挖掘、多语言翻译。
 
-合规是**两层**的,别把两层混为一谈:
+确定性闸门有**两类**,都在模型之外先行判定:
 
-  1. 确定性闸门(compliance.scan) —— 命中违禁词/促销语/绝对化用语/未授权认证
-     直接判不合格,LLM 无权推翻,也不会被调用。
-  2. LLM 审查(本文件的 check_compliance) —— 未命中时再由模型细查参数单位、
-     标题格式、关键词堆砌、语言一致性等软问题。
+  1. 违禁词(compliance.scan) —— 绝对化用语 / 促销语 / 承诺性表述 / 医疗功效 /
+     联系方式外链 / 未授权认证。命中即判不合格,LLM 无权推翻,也不会被调用。
+  2. 参数锚定(spec_anchor.check_spec_anchor) —— Listing 里的数值型参数必须能在
+     卖家填写的规格里找到,查不到即为候选编造。
 
-`generate_listing` 用第 1 层做「生成 → 拦截 → 重写」闭环,最多 MAX_COMPLIANCE_RETRIES 轮。
+两类都通过后,才轮到 LLM 细查(本文件的 check_compliance)参数单位、标题格式、
+关键词堆砌、语言一致性这类软问题 —— 那些是模型更擅长的部分。
+
+`generate_listing` 用前两类做「生成 → 拦截 → 重写」闭环,最多 MAX_GATE_RETRIES 轮。
 """
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -23,17 +26,28 @@ from prompts import (
     translate_prompt,
 )
 from review_miner import read_reviews_csv
+from spec_anchor import check_spec_anchor
 
-MAX_COMPLIANCE_RETRIES = 3
+MAX_GATE_RETRIES = 3
+
+# 兼容旧名字
+MAX_COMPLIANCE_RETRIES = MAX_GATE_RETRIES
+
+
+def run_deterministic_gates(text: str, my_product_specs: str = "") -> list:
+    """两类确定性闸门合一:违禁词 + 参数锚定。不调用任何模型。"""
+    return scan(text) + check_spec_anchor(text, my_product_specs)
 
 
 def generate_listing(
     competitor_insights: str,
     my_product_specs: str = "",
     llm=None,
-    max_retries: int = MAX_COMPLIANCE_RETRIES,
+    max_retries: int = MAX_GATE_RETRIES,
 ) -> dict:
-    """根据竞品评论洞察 + 卖家产品规格生成 Listing,并用确定性闸门做「生成 → 拦截 → 重写」闭环。
+    """根据竞品评论洞察 + 卖家产品规格生成 Listing,并用确定性闸门做闭环。
+
+    「生成 → 拦截 → 重写」:命中项连同修改建议回喂给模型重新生成,直到两类闸门都放行。
 
     返回:
         {"text": 最终文案, "attempts": 实际轮次,
@@ -52,7 +66,7 @@ def generate_listing(
             ),
         ])
         text = resp.content
-        violations = scan(text)
+        violations = run_deterministic_gates(text, my_product_specs)
         if not violations:
             return {"text": text, "attempts": attempt, "violations": [], "passed": True}
 
@@ -64,16 +78,16 @@ def generate_listing(
     }
 
 
-def check_compliance(listing_text: str, llm=None) -> str:
+def check_compliance(listing_text: str, llm=None, my_product_specs: str = "") -> str:
     """合规审查:先跑确定性闸门,命中即直接判不合格;未命中再交给 LLM 细查。
 
     命中时**不调用模型** —— 红线是硬性的,不需要也不应该让模型再判一次
     (既可能被推翻,也白花一次 token)。
     """
-    violations = scan(listing_text)
+    violations = run_deterministic_gates(listing_text, my_product_specs)
     if violations:
         return (
-            "❌ 未通过确定性合规闸门(一票否决,未经模型判定)\n\n"
+            "❌ 未通过确定性闸门(一票否决,未经模型判定)\n\n"
             + format_violations(violations)
             + "\n\n以上命中项必须修改后重新生成;LLM 细查已跳过。"
         )

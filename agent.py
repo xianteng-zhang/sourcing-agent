@@ -1,13 +1,16 @@
 """选品 + 上架 Agent:LangGraph ReAct,LLM 自主规划调用工具。
 
 Agent 绑定五个工具:
-1. analyze_reviews     —— 评论挖掘,提取卖点/痛点/动机/竞品
-2. extract_keywords    —— 从评论提取买家高频关键词
-3. generate_listing    —— 根据卖点生成 Listing 文案
+1. analyze_reviews     —— 竞品评论挖掘,提取卖点/痛点/动机/竞品
+2. extract_keywords    —— 从竞品评论提取买家高频关键词
+3. generate_listing    —— 竞品洞察 → 我产品的 Listing(内置两类确定性闸门)
 4. translate_listing   —— 把 Listing 翻译成多语言
-5. compliance_check    —— 合规审查
+5. compliance_check    —— 合规与参数锚定审查
 
 LLM 根据用户需求自主决定:调用哪些工具、什么顺序、结果怎么流转。
+
+**卖家产品规格通过闭包注入 `generate_listing`,不经过模型中转** —— 否则模型漏抄、
+截断规格时不会报错,只会安静地产出一份全是【待填写】的 Listing。
 """
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
@@ -23,25 +26,26 @@ from listing_generator import (
 from review_miner import analyze_reviews, compute_stats, read_reviews_csv
 
 AGENT_SYSTEM = (
-    "你是跨境电商「选品 + 上架」助手。用户会给你【竞品】的商品评论 CSV、需求,"
-    "以及【卖家自己产品】的规格(可能为空)。\n"
+    "你是跨境电商「选品 + 上架」助手。用户会给你【竞品】的商品评论 CSV 和需求。\n"
     "你的任务:分析竞品评论,挖掘买家在意的卖点、竞品的痛点、高频关键词,"
-    "然后基于这些洞察 + 卖家提供的产品规格,生成【卖家自己产品】的 Listing。\n"
+    "然后基于这些洞察生成【卖家自己产品】的 Listing。\n"
     "你有五个工具:\n"
     "1. analyze_reviews:分析竞品评论,挖出卖点/痛点/购买动机/竞品线索\n"
     "2. extract_keywords:从竞品评论提取买家高频关键词(用于埋词和广告)\n"
-    "3. generate_listing:根据竞品洞察 + 产品规格生成 Listing(标题/五点/详情/关键词)\n"
+    "3. generate_listing:根据竞品洞察生成我产品的 Listing(标题/五点/详情/关键词)\n"
     "4. translate_listing:把 Listing 翻译成目标语言(日语/西语/德语/法语等)\n"
-    "5. compliance_check:检查 Listing 文案的合规风险\n"
+    "5. compliance_check:检查 Listing 文案的合规与参数风险\n"
     "你要自主规划:根据用户需求决定调用哪些工具、什么顺序,最后综合输出一份完整报告。\n"
     "注意:\n"
-    "- 竞品评论是「洞察来源」,不是「参数来源」;参数必须来自卖家提供的规格,"
-    "没有就留【待填写】,绝不能从竞品评论编造。\n"
+    "- 卖家自己产品的规格**已经直接绑定在 generate_listing 工具上**,你不需要也无法传它;"
+    "你只要把竞品洞察传进去即可。\n"
+    "- 竞品评论是「洞察来源」,不是「参数来源」;参数全部取自那份已绑定的规格,"
+    "缺失处会标【待填写】,绝不能从竞品评论编造。\n"
     "- 竞品的痛点 = 我产品的差异化机会。\n"
-    "- generate_listing 内置了确定性合规闸门(命中违禁词会自动重写,最多 3 轮),"
-    "工具返回开头的 [合规闸门] 一行会告诉你是否通过。\n"
-    "- 生成 Listing 后,通常应该再用 compliance_check 检查一遍合规性。\n"
-    "- 若 [合规闸门] 显示未通过,必须在最终回答里明确指出残留问题,"
+    "- generate_listing 内置两类确定性闸门(违禁词 + 参数锚定),命中会自动重写,"
+    "最多 3 轮;工具返回开头的 [确定性闸门] 一行会告诉你是否通过。\n"
+    "- 生成 Listing 后,通常应该再用 compliance_check 检查一遍。\n"
+    "- 若 [确定性闸门] 显示未通过,必须在最终回答里明确指出残留问题,"
     "不得把它当作可直接上架的文案。\n"
     "- 最终回答必须【完整、原文】贴出工具生成的全部内容,尤其是完整的 Listing 文案"
     "(标题、五点描述、详情页、规格参数表、关键词建议),一字不差地展示出来,"
@@ -49,8 +53,8 @@ AGENT_SYSTEM = (
 )
 
 
-def build_agent(llm):
-    """构建选品 + 上架 Agent(工具闭包持有 llm)。"""
+def build_agent(llm, my_product_specs: str = ""):
+    """构建选品 + 上架 Agent(工具闭包持有 llm 与卖家规格)。"""
 
     @tool
     def analyze_reviews_tool(csv_path: str) -> str:
@@ -86,17 +90,20 @@ def build_agent(llm):
         return extract_keywords(csv_path, llm=llm)
 
     @tool
-    def generate_listing_tool(competitor_insights: str, my_product_specs: str = "") -> str:
-        """根据竞品评论洞察 + 卖家产品规格,生成卖家自己产品的 Listing(标题、五点、详情、关键词)。
-        已内置确定性合规闸门:命中违禁词会自动重写,最多 3 轮。
-        参数 competitor_insights:竞品评论分析出的卖点/痛点/关键词;
-        my_product_specs:卖家自己产品的硬参数(品类/尺寸/材质/认证等,可为空)。"""
+    def generate_listing_tool(competitor_insights: str) -> str:
+        """根据竞品评论洞察,生成卖家自己产品的 Listing(标题、五点、详情、关键词)。
+        卖家产品规格已绑定在本工具上,无需也无法传入。
+        已内置两类确定性闸门(违禁词 + 参数锚定):命中会自动重写,最多 3 轮。
+        参数 competitor_insights:竞品评论分析出的卖点/痛点/关键词。"""
         result = generate_listing(competitor_insights, my_product_specs, llm=llm)
         if result["passed"]:
-            status = f"[合规闸门] 第 {result['attempts']} 轮通过,未命中违禁词。\n\n"
+            status = (
+                f"[确定性闸门] 第 {result['attempts']} 轮通过,"
+                "未命中违禁词,也未发现编造参数。\n\n"
+            )
         else:
             status = (
-                f"[合规闸门] 已达 {result['attempts']} 轮上限仍未通过,"
+                f"[确定性闸门] 已达 {result['attempts']} 轮上限仍未通过,"
                 "以下问题**未修复**,不得当作可上架文案:\n"
                 + format_violations(result["violations"])
                 + "\n\n"
@@ -111,9 +118,9 @@ def build_agent(llm):
 
     @tool
     def compliance_check_tool(listing_text: str) -> str:
-        """检查 Listing 文案的合规风险(违禁词、夸大宣传、侵权)。
+        """检查 Listing 文案的合规风险(违禁词、夸大宣传、编造参数、侵权)。
         参数 listing_text:需要检查的文案全文。"""
-        return check_compliance(listing_text, llm=llm)
+        return check_compliance(listing_text, llm=llm, my_product_specs=my_product_specs)
 
     tools = [
         analyze_reviews_tool,
@@ -125,9 +132,9 @@ def build_agent(llm):
     return create_react_agent(llm, tools, prompt=AGENT_SYSTEM)
 
 
-def run_agent(csv_path: str, user_request: str, llm) -> dict:
+def run_agent(csv_path: str, user_request: str, llm, my_product_specs: str = "") -> dict:
     """运行选品 + 上架 Agent,返回最终回答 + 工具调用过程。"""
-    agent = build_agent(llm)
+    agent = build_agent(llm, my_product_specs)
     default_request = "请分析这些竞品的评论(卖点/痛点/关键词),然后生成我产品的 Listing 上架文案,并做合规审查。"
     prompt = f"竞品评论 CSV 路径:{csv_path}\n用户需求:{user_request or default_request}"
     result = agent.invoke({"messages": [HumanMessage(content=prompt)]})
@@ -148,12 +155,14 @@ def run_agent(csv_path: str, user_request: str, llm) -> dict:
     return {"answer": final, "steps": steps}
 
 
-def run_agent_stream(csv_path: str, user_request: str, llm, on_step=None) -> dict:
+def run_agent_stream(
+    csv_path: str, user_request: str, llm, on_step=None, my_product_specs: str = ""
+) -> dict:
     """流式运行 Agent,每一步通过 on_step(tool, result) 回调通知(用于实时展示)。
 
     on_step(tool_name, result):result 为 None 表示「开始调用工具」,有值表示「工具完成」。
     """
-    agent = build_agent(llm)
+    agent = build_agent(llm, my_product_specs)
     default_request = "请分析这些竞品的评论(卖点/痛点/关键词),然后生成我产品的 Listing 上架文案,并做合规审查。"
     prompt = f"竞品评论 CSV 路径:{csv_path}\n用户需求:{user_request or default_request}"
 

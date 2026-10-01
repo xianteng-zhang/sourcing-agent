@@ -1,15 +1,23 @@
-"""合规闸门与重写闭环的测试。
+"""确定性闸门与重写闭环的测试。
 
-这个文件存在的理由:合规是**两层**的,而两层都容易悄悄失效——
-确定性闸门失效是「漏拦」(最危险),重写闭环失效是「空转」(最烧钱)。
+这个文件存在的理由:闸门和闭环都容易**悄悄失效**——
+闸门失效是「漏拦」(最危险),闭环失效是「空转」(最烧钱)。
 两类都用测试钉住。
+
+闸门本身也分两类:违禁词(compliance)与参数锚定(spec_anchor)。
 
 运行:pytest -q
 """
 import pytest
 
 from compliance import format_violations, scan, strip_commentary
-from listing_generator import MAX_COMPLIANCE_RETRIES, check_compliance, generate_listing
+from listing_generator import (
+    MAX_GATE_RETRIES,
+    check_compliance,
+    generate_listing,
+    run_deterministic_gates,
+)
+from spec_anchor import check_spec_anchor
 
 # 一份真实风格、完全合规的 Listing —— 用作「不误报」的基线
 CLEAN_LISTING = """# Elihome 木纤维复合砧板 — 亚马逊 Listing
@@ -27,6 +35,15 @@ Elihome 木纤维复合砧板 带汁水槽 防滑橡胶脚 可进洗碗机 中�
 ## 三、规格参数
 尺寸 38x28x1.2cm,重量 620g,材质 木纤维复合。
 """
+
+# 与 CLEAN_LISTING 里的参数一一对应 —— 参数锚定闸门要求 Listing 的数值必须来自这里
+MY_SPECS = (
+    "品类:木纤维复合砧板\n"
+    "尺寸:38x28x1.2cm\n"
+    "重量:620g\n"
+    "材质:木纤维复合,密度 1.1g/cm³\n"
+    "汁水槽容量:60ml"
+)
 
 
 class _ScriptedLLM:
@@ -149,13 +166,14 @@ class _ExplodingLLM:
 
 def test_check_compliance_short_circuits_without_calling_llm():
     verdict = check_compliance("本产品终身保修,绝对是最好的", llm=_ExplodingLLM())
-    assert "未通过确定性合规闸门" in verdict
+    assert "未通过确定性闸门" in verdict
     assert "承诺性表述" in verdict and "绝对化用语" in verdict
 
 
 def test_check_compliance_delegates_to_llm_when_clean():
     llm = _ScriptedLLM(["LLM 细查结论:未发现违规"])
-    assert check_compliance(CLEAN_LISTING, llm=llm) == "LLM 细查结论:未发现违规"
+    verdict = check_compliance(CLEAN_LISTING, llm=llm, my_product_specs=MY_SPECS)
+    assert verdict == "LLM 细查结论:未发现违规"
     assert len(llm.prompts) == 1
 
 
@@ -163,7 +181,7 @@ def test_check_compliance_delegates_to_llm_when_clean():
 
 def test_generate_listing_passes_on_first_attempt():
     llm = _ScriptedLLM([CLEAN_LISTING])
-    result = generate_listing("不含微塑料 / 防滑", llm=llm)
+    result = generate_listing("不含微塑料 / 防滑", MY_SPECS, llm=llm)
     assert result["passed"] is True
     assert result["attempts"] == 1
     assert result["violations"] == []
@@ -173,7 +191,7 @@ def test_generate_listing_passes_on_first_attempt():
 def test_generate_listing_rewrites_until_gate_passes():
     bad = "# 标题\n全网最低价,包邮,终身保修"
     llm = _ScriptedLLM([bad, CLEAN_LISTING])
-    result = generate_listing("防滑", llm=llm)
+    result = generate_listing("防滑", MY_SPECS, llm=llm)
 
     assert result["attempts"] == 2
     assert result["passed"] is True
@@ -188,7 +206,7 @@ def test_generate_listing_feeds_violations_back_into_prompt():
     """
     bad = "最佳品质,秒杀同行"
     llm = _ScriptedLLM([bad, CLEAN_LISTING])
-    generate_listing("防滑", llm=llm)
+    generate_listing("防滑", MY_SPECS, llm=llm)
 
     assert "上一版被确定性合规闸门拦下" not in llm.prompts[0]
     assert "上一版被确定性合规闸门拦下" in llm.prompts[1]
@@ -198,19 +216,82 @@ def test_generate_listing_feeds_violations_back_into_prompt():
 
 def test_generate_listing_gives_up_after_max_retries():
     llm = _ScriptedLLM(["终身保修,保证满意"])
-    result = generate_listing("防滑", llm=llm)
+    result = generate_listing("防滑", MY_SPECS, llm=llm)
 
-    assert result["attempts"] == MAX_COMPLIANCE_RETRIES
-    assert len(llm.prompts) == MAX_COMPLIANCE_RETRIES
+    assert result["attempts"] == MAX_GATE_RETRIES
+    assert len(llm.prompts) == MAX_GATE_RETRIES
     assert result["passed"] is False
     assert {v.category for v in result["violations"]} == {"承诺性表述"}
 
 
 def test_generate_listing_respects_custom_retry_budget():
     llm = _ScriptedLLM(["包邮"])
-    result = generate_listing("防滑", llm=llm, max_retries=2)
+    result = generate_listing("防滑", MY_SPECS, llm=llm, max_retries=2)
     assert result["attempts"] == 2
     assert len(llm.prompts) == 2
+
+
+# ------------------------------------------------------- 参数锚定(规格锚点)
+
+def test_spec_anchor_passes_when_params_come_from_specs():
+    """卖家规格里的参数出现在 Listing 中,必须放行。"""
+    assert check_spec_anchor(CLEAN_LISTING, MY_SPECS) == []
+
+
+def test_spec_anchor_ignores_unit_synonyms_and_decimal_writing():
+    """规格写「320 克」、文案写「320g」,是同一件事,不能误报。"""
+    assert check_spec_anchor("重量 320g", "重量:320 克") == []
+    assert check_spec_anchor("重量 320.0g", "重量:320 克") == []
+
+
+def test_spec_anchor_catches_invented_weight():
+    """规格里没有 320g,文案却写了 —— 这就是编造。"""
+    hits = check_spec_anchor("重量 320g,轻便易携带", "重量:620g")
+    assert [v.category for v in hits] == ["参数锚定"]
+    assert "320" in hits[0].advice
+
+
+def test_spec_anchor_catches_dimension_chain_without_unit():
+    """无单位的尺寸链也要抓:规格没写 1920x1080,文案不能自己编。"""
+    hits = check_spec_anchor("屏幕 1920x1080 全高清", "屏幕:15.6 英寸")
+    assert {v.category for v in hits} == {"参数锚定"}
+    assert {v.matched for v in hits} == {"1920x1080"}
+    assert len(hits) == 2  # 1920 与 1080 各报一条
+
+
+def test_spec_anchor_flags_concrete_params_when_specs_empty():
+    """卖家什么都没填时,文案里就不该出现任何具体参数(应标【待填写】)。"""
+    hits = check_spec_anchor("重量 620g,尺寸 38x28cm", "")
+    assert hits, "规格为空却写了具体参数,必须拦下"
+
+
+def test_spec_anchor_allows_placeholder_only_listing():
+    """全是【待填写】的文案是正确输出,不能误报。"""
+    listing = "## 规格参数\n尺寸:【待填写】\n重量:【待填写】\n材质:【待填写】"
+    assert check_spec_anchor(listing, "") == []
+
+
+def test_spec_anchor_does_not_confuse_english_words():
+    """「5 min」「8GB」不能被当成 5m / 8g —— 单字母单位后加了 ASCII 边界。"""
+    assert check_spec_anchor("充电 5 min 即可", "") == []
+    assert check_spec_anchor("内存 8GB LPDDR5", "内存:8GB") == []
+
+
+def test_run_deterministic_gates_combines_both_families():
+    text = "全网最低价,重量 320g"
+    categories = {v.category for v in run_deterministic_gates(text, "重量:620g")}
+    assert categories == {"绝对化用语", "参数锚定"}
+
+
+def test_generate_listing_rewrites_on_spec_violation():
+    """参数锚定命中也必须触发重写闭环(和违禁词走同一条路)。"""
+    invented = "# 标题\nElihome 砧板 重量 320g"
+    llm = _ScriptedLLM([invented, CLEAN_LISTING])
+    result = generate_listing("竞品洞察", MY_SPECS, llm=llm)
+
+    assert result["attempts"] == 2
+    assert result["passed"] is True
+    assert "参数锚定" in llm.prompts[1]  # 命中项被回喂给模型
 
 
 # ------------------------------------------------- agent 层:步骤组装
@@ -238,7 +319,7 @@ class _FakeAgent:
 def test_run_agent_stream_assembles_steps_in_order(monkeypatch):
     import agent as agent_mod
 
-    monkeypatch.setattr(agent_mod, "build_agent", lambda llm: _FakeAgent())
+    monkeypatch.setattr(agent_mod, "build_agent", lambda llm, specs="": _FakeAgent())
     seen: list[tuple] = []
 
     result = agent_mod.run_agent_stream(
