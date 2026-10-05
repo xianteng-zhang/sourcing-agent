@@ -280,7 +280,7 @@ with tab_agent:
             st.subheader("📝 最终报告")
             st.markdown(result["answer"])
 
-            # 保存到历史记录
+            # 保存到历史记录(run_id 指向事件流,历史里才能回放这次运行)
             storage.save_analysis(
                 title=user_request or "选品 Agent 默认流程",
                 review_count=None,
@@ -288,8 +288,9 @@ with tab_agent:
                 stats={},
                 report=result["answer"],
                 type="选品Agent",
+                run_id=result["run_id"],
             )
-            st.success("已保存到「历史记录」")
+            st.success("已保存到「历史记录」(含这次运行的事件流,可在历史里回放)")
         except Exception as exc:
             st.error(f"出错了:{exc}")
             if "DEEPSEEK_API_KEY" in str(exc):
@@ -361,8 +362,9 @@ with tab_compare:
                 stats={},
                 report=result["report"],
                 type="竞品对比",
+                run_id=result.get("run_id"),
             )
-            st.success("已保存到「历史记录」")
+            st.success("已保存到「历史记录」(竞品分析跑在持久化队列上,可在历史里回看)")
         except Exception as exc:
             st.error(f"出错了:{exc}")
             if "DEEPSEEK_API_KEY" in str(exc):
@@ -423,6 +425,21 @@ with tab_history:
                 full = storage.get_analysis(r["id"])
                 if full and full.get("report"):
                     st.markdown(full["report"])
+
+                # 这次运行的事件流还在的话,就能回放当时到底调了哪几个工具
+                run_id = (full or {}).get("run_id") or r.get("run_id")
+                if run_id:
+                    run_events = events.DEFAULT_LOG.events_since(run_id)
+                    if run_events:
+                        with st.expander(
+                            f"🧵 回放这次运行（{len(run_events)} 个事件 · "
+                            f"`{run_id}` · seq 1~{run_events[-1]['seq']}）"
+                        ):
+                            for ev in run_events:
+                                st.text(f"#{ev['seq']:>3}  {ev['type']:<13} {ev['data']}")
+                    else:
+                        st.caption(f"这次运行的事件已不在库里（`{run_id}`）")
+
                 if st.button("删除这条", key=f"del_{r['id']}"):
                     storage.delete_analysis(r["id"])
                     st.rerun()

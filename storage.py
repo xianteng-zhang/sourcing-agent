@@ -1,4 +1,10 @@
-"""历史分析记录的本地存储(SQLite 单文件,零配置)。"""
+"""历史分析记录的本地存储(SQLite 单文件,零配置)。
+
+`run_id` 这一列是**指向事件日志的外键**(软引用,不建 CONSTRAINT):
+它把「这条报告」和「当时那次运行产生了哪些事件」连起来,于是历史记录里
+可以回放当时到底调了哪几个工具、什么顺序、哪一步失败 —— 而不用把事件
+自己复制一份进来(那会造成两份数据,还可能不一致)。
+"""
 import json
 import sqlite3
 from datetime import datetime
@@ -15,7 +21,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """建表(不存在才建),并为旧库补齐 type 字段。"""
+    """建表(不存在才建),并为旧库补上后来加的列。"""
     conn = _connect()
     try:
         conn.execute(
@@ -28,16 +34,20 @@ def init_db() -> None:
                 avg_rating REAL,
                 stats_json TEXT,
                 report TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                run_id TEXT
             )
             """
         )
-        # 迁移:旧表若缺 type 字段则补上
+        # 迁移:旧表缺哪列补哪列。留着这种迁移,是因为历史记录是用户数据,
+        # 不能因为加了一列就让人把库删掉重来。
         cols = [r[1] for r in conn.execute("PRAGMA table_info(analysis_history)")]
         if "type" not in cols:
             conn.execute(
                 "ALTER TABLE analysis_history ADD COLUMN type TEXT NOT NULL DEFAULT '评论挖掘'"
             )
+        if "run_id" not in cols:
+            conn.execute("ALTER TABLE analysis_history ADD COLUMN run_id TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -50,16 +60,23 @@ def save_analysis(
     stats: dict,
     report: str,
     type: str = "评论挖掘",
+    run_id: str | None = None,
 ) -> int:
-    """保存一次分析,返回记录 id。type 用于分类:评论挖掘 / 竞品对比 / 选品Agent。"""
+    """保存一次分析,返回记录 id。
+
+    type 用于分类:评论挖掘 / 竞品对比 / 选品Agent。
+    run_id 指向 events.db 里那次运行的事件流,存了它历史记录才能回放。
+    """
     init_db()
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _connect()
     try:
         cur = conn.execute(
-            "INSERT INTO analysis_history (type, title, review_count, avg_rating, stats_json, report, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (type, title, review_count, avg_rating, json.dumps(stats, ensure_ascii=False), report, created_at),
+            "INSERT INTO analysis_history "
+            "(type, title, review_count, avg_rating, stats_json, report, created_at, run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (type, title, review_count, avg_rating,
+             json.dumps(stats, ensure_ascii=False), report, created_at, run_id),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -73,7 +90,7 @@ def list_history(limit: int = 100) -> list[dict]:
     conn = _connect()
     try:
         rows = conn.execute(
-            "SELECT id, type, title, review_count, avg_rating, created_at "
+            "SELECT id, type, title, review_count, avg_rating, created_at, run_id "
             "FROM analysis_history ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
