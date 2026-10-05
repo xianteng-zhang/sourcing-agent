@@ -18,6 +18,7 @@ from trend_analyzer import get_trends, trend_summary
 
 import actions
 import events
+import jobs
 
 st.set_page_config(page_title="跨境电商选品与上架 Agent", page_icon="🛒", layout="wide")
 
@@ -319,6 +320,19 @@ with tab_compare:
 
             result = run_compare(products, llm, progress=on_progress)
             progress_bar.progress(1.0, text="对比完成")
+
+            # 把队列状态露出来:这是「持久化执行」在界面上唯一看得见的地方
+            stats = jobs.DEFAULT_QUEUE.stats(result["run_id"])
+            done_n, dead_n = stats.get("done", 0), stats.get("dead", 0)
+            st.caption(
+                f"队列 run `{result['run_id']}` ｜ 任务 {len(products)} 个："
+                f"已完成 **{done_n}**、失败 {dead_n}"
+                + ("　—— 已完成的结果存在库里，**再点一次「开始对比」会直接复用、不再调用模型**。"
+                   if done_n else "")
+            )
+            if result.get("failed"):
+                st.warning("这些竞品分析失败（其余正常汇总）：\n\n"
+                           + "\n".join(f"- **{k}**：{v}" for k, v in result["failed"].items()))
 
             st.subheader("📋 各竞品概览")
             for name, info in result["per_product"].items():
