@@ -26,7 +26,7 @@ with st.sidebar:
     st.markdown("- 🤖 选品 Agent\n- 📊 评论挖掘\n- ⚔️ 竞品对比\n- 📈 趋势分析\n- 📚 历史记录")
     st.divider()
     st.markdown("**🔌 评论抓取扩展**")
-    st.markdown("自研浏览器扩展,自动抓取亚马逊评论导出 CSV。")
+    st.markdown("自研浏览器扩展,自动抓取亚马逊 / 速卖通评论导出 CSV。")
     zip_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "extension", "amazon-review-scraper.zip")
     if os.path.exists(zip_path):
         with open(zip_path, "rb") as f:
