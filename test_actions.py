@@ -185,3 +185,30 @@ def test_list_pending_approvals(gate):
     gate.request_approval("publish_listing", {"text": "a"})
     gate.request_approval("publish_listing", {"text": "b"})
     assert len(gate.list_approvals(status="pending")) == 2
+
+
+# -------------------------- 回归:任何方法都要能在「全新库」上直接用
+
+def test_read_methods_work_on_a_fresh_db(tmp_path):
+    """回归 app 启动即崩:list_approvals 在从没写过的库上必须先建表。
+
+    这类 bug 之所以没被早先的用例抓到,是因为它们全都先写过一次;
+    而 app.py 打开界面做的第一件事就是读待审批列表。
+    """
+    gate = ActionGate(tmp_path / "fresh.db")
+    assert gate.get_approval(1) is None
+    assert gate.list_approvals() == []
+    assert gate.audit_log() == []
+
+
+def test_log_works_on_a_fresh_db(tmp_path):
+    gate = ActionGate(tmp_path / "fresh.db")
+    gate.log("analyze_reviews", READ, "allowed", "test")
+    assert len(gate.audit_log()) == 1
+
+
+def test_check_works_on_a_fresh_db(tmp_path):
+    gate = ActionGate(tmp_path / "fresh.db")
+    allowed, why = gate.check("publish_listing", {"x": 1}, None)
+    assert allowed is False
+    assert "approval_id" in why

@@ -305,3 +305,19 @@ def test_run_compare_reports_partial_failure(queue, tmp_path):
     assert set(out["per_product"]) == {"A"}
     assert "BAD" in out["failed"]
     assert "BAD" in out["report"], "失败名单应当写进报告里"
+
+
+# -------------------------- 回归:任何方法都要能在「全新库」上直接用
+
+def test_read_methods_work_on_a_fresh_db(tmp_path):
+    """回归:读方法必须自己建表,不能假设别人先写过。"""
+    q = JobQueue(tmp_path / "fresh.db")
+    assert q.stats("r1") == {PENDING: 0, RUNNING: 0, DONE: 0, DEAD: 0}
+    assert q.results("r1") == {}
+    assert q.failures("r1") == {}
+
+
+def test_write_helpers_are_safe_on_a_fresh_db(tmp_path):
+    q = JobQueue(tmp_path / "fresh.db")
+    q.complete(999, {})  # 不存在的 id,应当无害
+    assert q.fail(999, "x") == DEAD

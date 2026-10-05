@@ -134,6 +134,7 @@ class JobQueue:
     # ------------------------------------------------------ 完成 / 失败
 
     def complete(self, job_id: int, result: dict) -> None:
+        self.init_db()
         conn = self._connect()
         try:
             conn.execute(
@@ -149,6 +150,7 @@ class JobQueue:
 
         返回该任务的新状态,便于调用方与测试断言。
         """
+        self.init_db()
         conn = self._connect()
         try:
             row = conn.execute(
@@ -199,6 +201,7 @@ class JobQueue:
     # ------------------------------------------------------------ 查询
 
     def stats(self, run_id: str) -> dict[str, int]:
+        self.init_db()
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -214,6 +217,7 @@ class JobQueue:
 
     def results(self, run_id: str) -> dict[str, dict]:
         """已完成任务的结果,按 key 索引 —— 续跑时直接拿它跳过重算。"""
+        self.init_db()
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -226,6 +230,7 @@ class JobQueue:
 
     def failures(self, run_id: str) -> dict[str, str]:
         """彻底失败(dead)的任务与最后一次错误。"""
+        self.init_db()
         conn = self._connect()
         try:
             rows = conn.execute(

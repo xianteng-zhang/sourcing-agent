@@ -169,6 +169,7 @@ class ActionGate:
         return self.get_approval(approval_id)
 
     def get_approval(self, approval_id: int) -> dict | None:
+        self.init_db()  # 读也要保证表在,否则「先读后写」的库会直接崩
         conn = self._connect()
         try:
             row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
@@ -177,6 +178,7 @@ class ActionGate:
             conn.close()
 
     def list_approvals(self, status: str | None = None, limit: int = 50) -> list[dict]:
+        self.init_db()
         conn = self._connect()
         try:
             sql = "SELECT * FROM approvals"
@@ -193,6 +195,7 @@ class ActionGate:
 
     def log(self, action: str, tier: str, decision: str, actor: str,
             approval_id: int | None = None, detail: str | None = None) -> None:
+        self.init_db()
         conn = self._connect()
         try:
             conn.execute(
@@ -205,6 +208,7 @@ class ActionGate:
             conn.close()
 
     def audit_log(self, limit: int = 50) -> list[dict]:
+        self.init_db()
         conn = self._connect()
         try:
             return [dict(r) for r in conn.execute(
