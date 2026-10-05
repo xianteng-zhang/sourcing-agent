@@ -216,17 +216,6 @@ with tab_agent:
                 tmp.write(agent_csv.getbuffer())
                 csv_path = tmp.name
 
-            # 实时展示工具调用过程
-            process_box = st.empty()
-            process_lines = []
-
-            def on_step(tool, result_text):
-                if result_text is None:
-                    process_lines.append(f"🛠️ 正在调用 `{tool}` …")
-                else:
-                    process_lines.append(f"✅ `{tool}` 完成")
-                process_box.markdown("\n\n".join(process_lines))
-
             spec_parts = []
             for label, val in [
                 ("品类", spec_category), ("材质", spec_material),
@@ -238,25 +227,43 @@ with tab_agent:
                 spec_parts.append("详细规格:\n" + spec_detail.strip())
             my_specs = "\n".join(spec_parts)
 
-            # 规格通过闭包注入 Agent,不拼进对话 —— 避免模型漏抄/截断后静默降级
-            result = run_agent_stream(csv_path, user_request, llm, on_step, my_specs)
+            # 运行中展开、跑完自动折成一行 —— 否则那串「正在调用…」会一直挂在页面上
+            with st.status("🤖 Agent 运行中…", expanded=True) as status:
+                process_box = st.empty()
+                process_lines = []
+
+                def on_step(tool, result_text):
+                    if result_text is None:
+                        process_lines.append(f"🛠️ 正在调用 `{tool}` …")
+                    else:
+                        process_lines.append(f"✅ `{tool}` 完成")
+                    process_box.markdown("\n\n".join(process_lines))
+
+                # 规格通过闭包注入 Agent,不拼进对话 —— 避免模型漏抄/截断后静默降级
+                result = run_agent_stream(csv_path, user_request, llm, on_step, my_specs)
+
+                # 跑完把实时流水收掉,换成每步的参数与结果(仍收在同一个折叠里)
+                process_box.empty()
+                for i, step in enumerate(result.get("steps", []), 1):
+                    st.markdown(
+                        f"**步骤 {i}:`{step['tool']}`** ｜ 动作分级 `{step.get('tier', '?')}`"
+                    )
+                    if step.get("args"):
+                        st.caption(f"参数:{step['args']}")
+                    if step.get("result"):
+                        st.text(step["result"][:600] + ("…" if len(step["result"]) > 600 else ""))
+
+                n_steps = len(result.get("steps", []))
+                status.update(
+                    label=f"✅ 已完成 · {n_steps} 步工具调用（点这里展开看每步参数与结果）",
+                    state="complete",
+                    expanded=False,
+                )
 
             st.caption(
                 f"运行 `{result['run_id']}` ｜ 事件已落库到 seq **{result['last_seq']}**"
                 " —— 断线或刷新后，下面的回放只会补你没收到的那部分。"
             )
-
-            # 完整过程(含每步详情,折叠)
-            if result.get("steps"):
-                with st.expander("🔍 查看完整工作过程(含每步参数与结果)"):
-                    for i, step in enumerate(result["steps"], 1):
-                        st.markdown(
-                            f"**步骤 {i}:`{step['tool']}`** ｜ 动作分级 `{step.get('tier', '?')}`"
-                        )
-                        if step.get("args"):
-                            st.caption(f"参数:{step['args']}")
-                        if step.get("result"):
-                            st.text(step["result"][:600] + ("…" if len(step["result"]) > 600 else ""))
 
             with st.expander("🧵 事件回放(Last-Event-ID:只补没收到的那部分)"):
                 cursor = st.number_input(
