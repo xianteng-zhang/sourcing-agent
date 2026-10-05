@@ -15,6 +15,9 @@ from competitor_compare import run_compare
 from review_miner import run_review_mining
 from trend_analyzer import get_trends, trend_summary
 
+import actions
+import events
+
 st.set_page_config(page_title="跨境电商选品与上架 Agent", page_icon="🛒", layout="wide")
 
 # ---- 侧边栏 ----
@@ -40,6 +43,23 @@ with st.sidebar:
 
     st.divider()
     st.caption("数据来自商品评论 CSV,支持中英文、任意导出格式。")
+
+    # 外部副作用动作的**唯一**放行入口 —— 模型没有别的路能把自己的提议批掉
+    pending = actions.DEFAULT_GATE.list_approvals(status="pending")
+    if pending:
+        st.divider()
+        st.markdown(f"**⏳ 待审批动作({len(pending)})**")
+        st.caption("外部副作用(如发布 Listing)必须在这里人工确认后才会执行。")
+        for rec in pending:
+            st.markdown(f"`#{rec['id']}` {rec['action']}")
+            c_ok, c_no = st.columns(2)
+            if c_ok.button("✅ 批准", key=f"appr_{rec['id']}"):
+                actions.DEFAULT_GATE.decide(rec["id"], approved=True, by="user")
+                st.rerun()
+            if c_no.button("⛔ 拒绝", key=f"rej_{rec['id']}"):
+                actions.DEFAULT_GATE.decide(rec["id"], approved=False, by="user",
+                                            reason="界面拒绝")
+                st.rerun()
 
 st.title("🛒 跨境电商选品与上架 Agent")
 st.caption("选品 Agent + 评论挖掘 + 竞品对比 + 趋势分析,帮你看清「什么好卖、值不值得做」")
@@ -197,15 +217,34 @@ with tab_agent:
             # 规格通过闭包注入 Agent,不拼进对话 —— 避免模型漏抄/截断后静默降级
             result = run_agent_stream(csv_path, user_request, llm, on_step, my_specs)
 
+            st.caption(
+                f"运行 `{result['run_id']}` ｜ 事件已落库到 seq **{result['last_seq']}**"
+                " —— 断线或刷新后，下面的回放只会补你没收到的那部分。"
+            )
+
             # 完整过程(含每步详情,折叠)
             if result.get("steps"):
                 with st.expander("🔍 查看完整工作过程(含每步参数与结果)"):
                     for i, step in enumerate(result["steps"], 1):
-                        st.markdown(f"**步骤 {i}:`{step['tool']}`**")
+                        st.markdown(
+                            f"**步骤 {i}:`{step['tool']}`** ｜ 动作分级 `{step.get('tier', '?')}`"
+                        )
                         if step.get("args"):
                             st.caption(f"参数:{step['args']}")
                         if step.get("result"):
                             st.text(step["result"][:600] + ("…" if len(step["result"]) > 600 else ""))
+
+            with st.expander("🧵 事件回放(Last-Event-ID:只补没收到的那部分)"):
+                cursor = st.number_input(
+                    "只显示 seq 大于", min_value=0, max_value=int(result["last_seq"]),
+                    value=0, key="replay_cursor",
+                )
+                replayed = events.DEFAULT_LOG.events_since(result["run_id"], int(cursor))
+                if replayed:
+                    for ev in replayed:
+                        st.text(f"#{ev['seq']:>3}  {ev['type']:<13} {ev['data']}")
+                else:
+                    st.caption("没有新事件(游标已经是最新的)。")
 
             st.subheader("📝 最终报告")
             st.markdown(result["answer"])

@@ -316,14 +316,18 @@ class _FakeAgent:
         yield {"agent": {"messages": [_Msg("ai", content="最终报告")]}}
 
 
-def test_run_agent_stream_assembles_steps_in_order(monkeypatch):
+def test_run_agent_stream_assembles_steps_in_order(monkeypatch, tmp_path):
     import agent as agent_mod
+    from events import EventLog
 
-    monkeypatch.setattr(agent_mod, "build_agent", lambda llm, specs="": _FakeAgent())
+    monkeypatch.setattr(
+        agent_mod, "build_agent", lambda llm, specs="", gate=None: _FakeAgent()
+    )
+    log = EventLog(tmp_path / "events.db")  # 别写进项目真实的事件库
     seen: list[tuple] = []
 
     result = agent_mod.run_agent_stream(
-        "x.csv", "需求", llm=object(), on_step=lambda t, r: seen.append((t, r))
+        "x.csv", "需求", llm=object(), on_step=lambda t, r: seen.append((t, r)), log=log
     )
 
     assert result["answer"] == "最终报告"
@@ -332,5 +336,40 @@ def test_run_agent_stream_assembles_steps_in_order(monkeypatch):
     assert step["tool"] == "generate_listing"
     assert step["args"] == {"sell_points": "防滑"}
     assert step["result"] == "LISTING 文案"
+    assert step["tier"] == "draft", "步骤上应当带出该动作声明的分级"
     # 回调:先「开始」(result=None),再「完成」
     assert seen == [("generate_listing", None), ("generate_listing", "LISTING 文案")]
+
+
+def test_run_agent_stream_writes_replayable_events(monkeypatch, tmp_path):
+    """一次运行的事件要能按 seq 回放,并且断线后只补没收到的那部分。"""
+    import agent as agent_mod
+    from events import EventLog
+
+    monkeypatch.setattr(
+        agent_mod, "build_agent", lambda llm, specs="", gate=None: _FakeAgent()
+    )
+    log = EventLog(tmp_path / "events.db")
+
+    result = agent_mod.run_agent_stream("x.csv", "需求", llm=object(), log=log)
+    run_id = result["run_id"]
+
+    events = log.events_since(run_id)
+    assert [e["type"] for e in events] == [
+        "run_started", "tool_call", "tool_result", "run_finished"]
+    assert [e["seq"] for e in events] == [1, 2, 3, 4]
+    assert log.missing_seqs(run_id) == []
+    assert result["last_seq"] == 4
+
+    # 断线重连:客户端记得 2,只该补 3、4
+    assert [e["seq"] for e in log.events_since(run_id, 2)] == [3, 4]
+
+
+def test_every_agent_tool_declares_its_tier():
+    """Agent 里每个工具都必须声明动作分级 —— 否则说不清它能不能对外动真格。"""
+    from actions import ACTIONS
+    from agent import AGENT_TOOLS
+
+    missing = [t for t in AGENT_TOOLS if t not in ACTIONS]
+    assert not missing, f"这些工具没有声明 tier:{missing}"
+    assert ACTIONS["publish_listing"] == "external"

@@ -4,7 +4,8 @@ __pycache__/
 *.pyc
 .env
 .pytest_cache/
-data/history.db
+data/*.db
+outbox/
 *.whl
 
 # 本地参考资料(第三方页面截图),不属于仓库内容
