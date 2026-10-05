@@ -2,6 +2,7 @@
 
 用法:streamlit run app.py
 """
+import json
 import os
 import tempfile
 from datetime import datetime
@@ -10,7 +11,7 @@ import streamlit as st
 
 import config
 import storage
-from agent import run_agent_stream
+from agent import run_agent_stream, write_outbox
 from competitor_compare import run_compare
 from review_miner import run_review_mining
 from trend_analyzer import get_trends, trend_summary
@@ -45,21 +46,43 @@ with st.sidebar:
     st.caption("数据来自商品评论 CSV,支持中英文、任意导出格式。")
 
     # 外部副作用动作的**唯一**放行入口 —— 模型没有别的路能把自己的提议批掉
-    pending = actions.DEFAULT_GATE.list_approvals(status="pending")
-    if pending:
+    gate = actions.DEFAULT_GATE
+    pending = gate.list_approvals(status="pending")
+    approved = gate.list_approvals(status="approved")
+    executed = {r["approval_id"] for r in gate.audit_log(limit=200)
+                if r["decision"] == "allowed"}
+
+    if pending or approved:
         st.divider()
-        st.markdown(f"**⏳ 待审批动作({len(pending)})**")
-        st.caption("外部副作用(如发布 Listing)必须在这里人工确认后才会执行。")
-        for rec in pending:
-            st.markdown(f"`#{rec['id']}` {rec['action']}")
-            c_ok, c_no = st.columns(2)
-            if c_ok.button("✅ 批准", key=f"appr_{rec['id']}"):
-                actions.DEFAULT_GATE.decide(rec["id"], approved=True, by="user")
-                st.rerun()
-            if c_no.button("⛔ 拒绝", key=f"rej_{rec['id']}"):
-                actions.DEFAULT_GATE.decide(rec["id"], approved=False, by="user",
-                                            reason="界面拒绝")
-                st.rerun()
+
+    for rec in pending:
+        st.markdown(f"**⏳ 待审批** `#{rec['id']}` · {rec['action']}")
+        body = json.loads(rec["payload_json"]).get("listing_text", "")
+        with st.expander("查看要发布的内容"):
+            st.text(body[:500] + ("…" if len(body) > 500 else ""))
+        c_ok, c_no = st.columns(2)
+        if c_ok.button("✅ 批准", key=f"appr_{rec['id']}"):
+            gate.decide(rec["id"], approved=True, by="user")
+            st.rerun()
+        if c_no.button("⛔ 拒绝", key=f"rej_{rec['id']}"):
+            gate.decide(rec["id"], approved=False, by="user", reason="界面拒绝")
+            st.rerun()
+
+    for rec in approved:
+        if rec["id"] in executed:
+            continue  # 已经发布过的就不再给了
+        st.markdown(f"**✅ 已批准** `#{rec['id']}` · {rec['action']}")
+        if st.button("🚀 发布这条(执行已批准的内容)", key=f"pub_{rec['id']}"):
+            payload = json.loads(rec["payload_json"])
+            try:
+                out = gate.execute(
+                    "publish_listing", payload,
+                    lambda: write_outbox(payload.get("listing_text", "")),
+                    approval_id=rec["id"], actor="user",
+                )
+                st.success(f"已发布:{out['result']['path']}")
+            except Exception as exc:  # noqa: BLE001 - 门禁拒绝时把原因显示出来
+                st.error(f"发布失败:{exc}")
 
 st.title("🛒 跨境电商选品与上架 Agent")
 st.caption("选品 Agent + 评论挖掘 + 竞品对比 + 趋势分析,帮你看清「什么好卖、值不值得做」")

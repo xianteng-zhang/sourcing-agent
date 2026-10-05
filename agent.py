@@ -64,7 +64,8 @@ AGENT_SYSTEM = (
     "注意:\n"
     "- **publish_listing 是外部副作用动作:没有人工批准就绝不会执行。**"
     "如果它返回「未执行」,说明已登记好待审批并等人在界面上确认 ——"
-    "你应当把这件事原样告诉用户,而不是反复重试、换参数试探或绕路。\n"
+    "你应当把这件事原样告诉用户、请他去「待审批动作」里确认后**再跑一次**,"
+    "而不是反复重试、换参数试探或绕路。用户确认后,同一份文案直接再调一次即可发布。\n"
     "- 卖家自己产品的规格**已经直接绑定在 generate_listing 工具上**,你不需要也无法传它;"
     "你只要把竞品洞察传进去即可。\n"
     "- 竞品评论是「洞察来源」,不是「参数来源」;参数全部取自那份已绑定的规格,"
@@ -79,6 +80,18 @@ AGENT_SYSTEM = (
     "(标题、五点描述、详情页、规格参数表、关键词建议),一字不差地展示出来,"
     "不要只说「已生成,见工具输出」。"
 )
+
+
+def write_outbox(listing_text: str) -> dict:
+    """把 Listing 落到本地 outbox。
+
+    真实平台发布需要 SP-API 之类的凭据,这里是有意为之的**占位实现** ——
+    门禁本身是完整的,不要把它说成「已对接平台」。
+    """
+    OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+    target = OUTBOX_DIR / f"listing-{uuid.uuid4().hex[:8]}.md"
+    target.write_text(listing_text, encoding="utf-8")
+    return {"path": str(target), "bytes": len(listing_text.encode("utf-8"))}
 
 
 def build_agent(llm, my_product_specs: str = "", gate: "actions.ActionGate | None" = None):
@@ -154,20 +167,14 @@ def build_agent(llm, my_product_specs: str = "", gate: "actions.ActionGate | Non
     @tool
     def publish_listing_tool(listing_text: str, approval_id: int | None = None) -> str:
         """把 Listing 发布到销售渠道。**外部副作用动作,必须有人工批准才会真正执行。**
-        参数 listing_text:要发布的文案全文;
-        approval_id:人工批准记录的编号(没有或无效时不会执行,只会登记一条待审批)。"""
+        参数 listing_text:要发布的文案全文。
+
+        不需要自己传批准编号:批准是**按内容认领**的 —— 人在界面上确认过这份文案之后,
+        再次调用本工具就会真正发布。没批准过则只会登记一条待审批,不会执行。"""
         payload = {"listing_text": listing_text}
 
-        def _do_publish() -> dict:
-            # 真实平台发布需要 SP-API 之类的凭据;这里落到本地 outbox 并记账,
-            # 门禁本身是完整的。发布不可撤销,所以走的是 EXTERNAL 分级。
-            OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
-            target = OUTBOX_DIR / f"listing-{uuid.uuid4().hex[:8]}.md"
-            target.write_text(listing_text, encoding="utf-8")
-            return {"path": str(target), "bytes": len(listing_text.encode("utf-8"))}
-
         try:
-            out = gate.execute("publish_listing", payload, _do_publish,
+            out = gate.execute("publish_listing", payload, lambda: write_outbox(listing_text),
                                approval_id=approval_id, actor="agent")
         except actions.ApprovalRequired as exc:
             rec = gate.request_approval("publish_listing", payload, requested_by="agent")

@@ -219,15 +219,46 @@ class ActionGate:
 
     # ------------------------------------------------------------ 门禁
 
-    def check(self, action: str, payload: Any, approval_id: int | None,
+    def find_approval(self, action: str, payload: Any,
+                      now: float | None = None) -> dict | None:
+        """按「动作 + 内容」找一条仍然有效的批准记录。
+
+        为什么需要它:批准是人在界面上点的,模型并不知道那条记录的编号。
+        如果非要把编号传回工具,流程就断了 —— 批准完还是发不出去。
+        所以按内容认领:谁批过**这份内容**,谁就能放行它。
+
+        安全性没有下降 —— 能被认领的记录只可能由人工裁决产生(`decide`),
+        而且绑定的是内容哈希,换一版内容就找不到记录。
+        """
+        now = time.time() if now is None else now
+        self.init_db()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE action = ? AND payload_hash = ? "
+                "AND status = 'approved' AND expires_at > ? ORDER BY id DESC LIMIT 1",
+                (action, payload_hash(payload), now),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def check(self, action: str, payload: Any, approval_id: int | None = None,
               now: float | None = None) -> tuple[bool, str]:
         """判定一个外部副作用动作能否执行。返回 (放行?, 原因)。
 
         默认拒绝。只有「已批准 + 动作一致 + 内容一致 + 未过期」四条全中才放行。
+
+        没给 approval_id 时会按内容自动认领一条有效批准;认领不到就拒绝。
         """
         now = time.time() if now is None else now
+
         if approval_id is None:
-            return False, "外部副作用动作必须携带 approval_id,当前没有"
+            hit = self.find_approval(action, payload, now=now)
+            if hit is None:
+                return False, "还没人批准过这份内容(且没有可用的人工批准记录)"
+            approval_id = hit["id"]
+
         rec = self.get_approval(approval_id)
         if rec is None:
             return False, f"批准记录 #{approval_id} 不存在"
@@ -249,6 +280,12 @@ class ActionGate:
         self.init_db()
 
         if tier == EXTERNAL:
+            # 先按内容认领一条有效批准,拿到**实际生效的**编号 ——
+            # 审计里要记的就是它,否则事后查不出是哪条批准放行的。
+            if approval_id is None:
+                hit = self.find_approval(action, payload, now=now)
+                approval_id = hit["id"] if hit else None
+
             allowed, why = self.check(action, payload, approval_id, now=now)
             if not allowed:
                 self.log(action, tier, "blocked", actor, approval_id, why)
@@ -263,6 +300,7 @@ class ActionGate:
             "result": result,
             "draft": tier == DRAFT,   # 可补编辑:结果只是草稿,可改可删
             "approved_by_human": tier == EXTERNAL,
+            "approval_id": approval_id,
         }
 
 

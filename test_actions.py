@@ -211,4 +211,46 @@ def test_check_works_on_a_fresh_db(tmp_path):
     gate = ActionGate(tmp_path / "fresh.db")
     allowed, why = gate.check("publish_listing", {"x": 1}, None)
     assert allowed is False
-    assert "approval_id" in why
+    assert "批准" in why
+
+
+# ------------------------- 批准按内容认领(否则人批完也发不出去)
+
+def test_approved_record_is_claimed_by_content_without_passing_id(gate):
+    """批准是人在界面上点的,模型并不知道编号 —— 所以门禁要按内容认领。
+
+    之前的实现要求调用方回传 approval_id,结果流程是断的:
+    人工批准完,Agent 依然发不出去。
+    """
+    payload = {"text": "正式文案"}
+    rec = gate.request_approval("publish_listing", payload)
+    gate.decide(rec["id"], approved=True, by="user")
+
+    out = gate.execute("publish_listing", payload, _ok)  # 不传 approval_id
+
+    assert out["ok"] is True
+    assert out["approved_by_human"] is True
+    assert gate.audit_log()[0]["approval_id"] == rec["id"]
+
+
+def test_auto_claim_does_not_unlock_a_different_payload(gate):
+    """认领只认真实批准过的那份内容,批 A 不能拿去发 B。"""
+    rec = gate.request_approval("publish_listing", {"text": "第一版"})
+    gate.decide(rec["id"], approved=True)
+
+    with pytest.raises(ApprovalRequired):
+        gate.execute("publish_listing", {"text": "偷偷改成第二版"}, _ok)
+
+
+def test_auto_claim_ignores_rejected_and_expired(gate):
+    payload = {"text": "x"}
+
+    rejected = gate.request_approval("publish_listing", payload)
+    gate.decide(rejected["id"], approved=False, reason="不行")
+    with pytest.raises(ApprovalRequired):
+        gate.execute("publish_listing", payload, _ok)
+
+    expired = gate.request_approval("publish_listing", payload, ttl_seconds=1)
+    gate.decide(expired["id"], approved=True)
+    with pytest.raises(ApprovalRequired):
+        gate.execute("publish_listing", payload, _ok, now=expired["expires_at"] + 1)
