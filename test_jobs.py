@@ -321,3 +321,41 @@ def test_write_helpers_are_safe_on_a_fresh_db(tmp_path):
     q = JobQueue(tmp_path / "fresh.db")
     q.complete(999, {})  # 不存在的 id,应当无害
     assert q.fail(999, "x") == DEAD
+
+
+# -------------------------- 回归:进度回调不许反过来改任务状态
+
+def test_a_broken_progress_callback_cannot_corrupt_job_state(queue):
+    """回归。progress 原先写在 try 里面,回调一抛异常就走 except 分支去
+    `fail()` 一个**刚刚 complete() 过**的任务 —— 已完成被翻回 pending(白跑一遍),
+    而且 done_count 被重复 +1,进度冲到 116%。
+
+    进度只是展示,它坏掉了不该影响任何一个任务的最终状态。
+    """
+    tasks = [(f"t{i}", {"i": i}) for i in range(6)]
+    seen: list[int] = []
+
+    def broken_progress(done: int, total: int) -> None:
+        seen.append(done)
+        raise RuntimeError("进度条坏了")
+
+    out = run_durable(queue, "r1", tasks, lambda p: {"ok": p["i"]},
+                      max_workers=2, progress=broken_progress)
+
+    assert queue.stats("r1")[DONE] == 6, "回调异常把已完成的任务翻回去了"
+    assert out["stats"][DEAD] == 0
+    assert len(out["results"]) == 6
+    assert max(seen) <= 6, f"进度被重复计数,冲过了总数: {seen}"
+    assert len(seen) == 6, f"每个任务该报一次进度,实际 {len(seen)} 次"
+
+
+def test_a_task_that_lands_dead_is_counted_exactly_once(queue):
+    """任务重试到落 dead,只算一次完成 —— 否则进度和统计都会多出来。"""
+    def always_fails(_payload):
+        raise ZeroDivisionError("故意炸")
+
+    out = run_durable(queue, "r1", [("bad", {})], always_fails, max_attempts=2)
+
+    assert out["failed"]["bad"].startswith("ZeroDivisionError")
+    assert out["stats"][DEAD] == 1
+    assert out["stats"][PENDING] == 0, "落 dead 之后不该还留在 pending"

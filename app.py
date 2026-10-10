@@ -332,13 +332,15 @@ with tab_compare:
                     out.write(f.getbuffer())
                 products.append((name, path))
 
-            progress_bar = st.progress(0.0, text="准备中…")
-
-            def on_progress(done: int, total: int):
-                progress_bar.progress(done / total, text=f"已分析 {done}/{total} 个竞品")
-
-            result = run_compare(products, llm, progress=on_progress)
-            progress_bar.progress(1.0, text="对比完成")
+            # 注意:进度回调是从**工作线程**里调的,那里没有 Streamlit 的脚本上下文,
+            # 在回调里碰 st.progress 会抛 NoSessionContext(而且会把任务标记搞乱)。
+            # 所以这里不画实时进度条,换成状态块。
+            with st.status(f"并行分析 {len(products)} 个竞品…", expanded=False) as cmp_status:
+                result = run_compare(products, llm)
+                cmp_status.update(
+                    label=f"分析完成 · 队列 {jobs.DEFAULT_QUEUE.stats(result['run_id'])}",
+                    state="complete",
+                )
 
             # 把队列状态露出来:这是「持久化执行」在界面上唯一看得见的地方
             stats = jobs.DEFAULT_QUEUE.stats(result["run_id"])
@@ -453,20 +455,16 @@ with tab_geo:
         if not geo_qs:
             st.error("至少要有一个问题。")
         else:
-            geo_bar = st.progress(0.0, text="采集开始…")
+            # 同竞品对比页:采集跑在工作线程里,回调不能碰 Streamlit 组件。
             with st.status(
                 f"采集 {len(geo_engines)} 引擎 × {len(geo_qs)} 问题 × {geo_samples} 次采样",
                 expanded=False,
             ) as geo_status:
-                geo_out = collect(
-                    geo_engines, geo_qs, samples=int(geo_samples),
-                    progress=lambda d, t: geo_bar.progress(d / t, text=f"{d}/{t} 个采样点"),
-                )
+                geo_out = collect(geo_engines, geo_qs, samples=int(geo_samples))
                 geo_status.update(
                     label=f"采集完成 · `{geo_out['run_id']}` · 队列 {geo_out['stats']}",
                     state="complete",
                 )
-            geo_bar.empty()
             st.session_state["geo_metrics"] = compute(
                 geo_out["answers"], geo_brand.strip(),
                 [a.strip() for a in geo_aliases_raw.split(",") if a.strip()],

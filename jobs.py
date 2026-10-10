@@ -291,22 +291,35 @@ def run_durable(
             job = queue.claim(owner, run_id=run_id, lease_seconds=lease_seconds)
             if job is None:
                 return
+            key = job["key"]
             try:
                 result = run_one(job["payload"])
+            except Exception as exc:  # noqa: BLE001 - 交给队列决定重试还是落 dead
+                detail = f"{type(exc).__name__}: {exc}"
+                if queue.fail(job["id"], detail) != DEAD:
+                    continue  # 还有重试额度,退回 pending 等下一次领
+                with lock:
+                    failures[key] = detail
+                    done_count += 1
+            else:
                 queue.complete(job["id"], result)
                 with lock:
-                    results[job["key"]] = result
+                    results[key] = result
                     done_count += 1
-                    if progress:
-                        progress(done_count, total)
-            except Exception as exc:  # noqa: BLE001 - 交给队列决定重试还是落 dead
-                state = queue.fail(job["id"], f"{type(exc).__name__}: {exc}")
-                if state == DEAD:
-                    with lock:
-                        failures[job["key"]] = f"{type(exc).__name__}: {exc}"
-                        done_count += 1
-                        if progress:
-                            progress(done_count, total)
+
+            # 进度回调必须放在**任务状态落库之后**、且**在 try 之外**。
+            #
+            # 之前它写在 try 里面,于是回调一抛异常,except 分支就会去 fail() 一个
+            # 刚刚 complete() 过的任务 —— 已完成的任务被翻回 pending(白跑一遍),
+            # 而且 done_count 会被重复 +1,进度冲到 116%。
+            # 进度是**展示**,任何情况下都不该反过来改任务状态。
+            if progress:
+                with lock:
+                    snapshot = done_count
+                try:
+                    progress(snapshot, total)
+                except Exception:  # noqa: BLE001 - 回调坏了也不能影响任务
+                    pass
 
     threads = [threading.Thread(target=worker, args=(i,), daemon=True)
                for i in range(max(1, min(max_workers, total)))]
