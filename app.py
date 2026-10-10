@@ -19,6 +19,16 @@ from trend_analyzer import get_trends, trend_summary
 import actions
 import events
 import jobs
+from engines import (
+    AnswerStore,
+    EngineError,
+    collect,
+    compute,
+    format_report,
+    from_env,
+    load_recordings,
+    summary,
+)
 
 st.set_page_config(page_title="跨境电商选品与上架 Agent", page_icon="🛒", layout="wide")
 
@@ -88,7 +98,8 @@ with st.sidebar:
 st.title("🛒 跨境电商选品与上架 Agent")
 st.caption("选品 Agent + 评论挖掘 + 竞品对比 + 趋势分析,帮你看清「什么好卖、值不值得做」")
 
-tab_mine, tab_agent, tab_compare, tab_trend, tab_history = st.tabs(["📊 评论挖掘", "🤖 选品 Agent", "⚔️ 竞品对比", "📈 趋势分析", "📚 历史记录"])
+tab_mine, tab_agent, tab_compare, tab_geo, tab_trend, tab_history = st.tabs(
+    ["📊 评论挖掘", "🤖 选品 Agent", "⚔️ 竞品对比", "🌐 AI 可见度", "📈 趋势分析", "📚 历史记录"])
 
 HOW_TO_CSV = """
 **方法 1:自研评论抓取扩展(推荐,一键导出)**
@@ -399,6 +410,110 @@ with tab_trend:
             except Exception as exc:
                 st.error(f"查询失败:{exc}")
                 st.info("pytrends 偶尔会被 Google 限流,稍后重试,或换成英文关键词。")
+
+# ---------------- AI 可见度(多引擎答案采集) ----------------
+with tab_geo:
+    st.header("AI 可见度")
+    st.caption(
+        "把品牌问题拿去问多个 AI,统计答案里**有没有你、排第几、引了谁**。"
+        "分母只算**有效样本** —— 引擎失败不会被记成「没提到你」。"
+    )
+
+    geo_mode = st.radio("引擎来源", ["🎬 录制回放(离线演示,不花钱)", "🌐 真实引擎"],
+                        horizontal=True, key="geo_mode")
+
+    geo_engines = []
+    if geo_mode.startswith("🎬"):
+        geo_engines = load_recordings()
+        if geo_engines:
+            st.caption(f"回放 engines/recordings/ 下的 {len(geo_engines)} 份录制,结果可复现。")
+        else:
+            st.warning("engines/recordings/ 下没有录制文件。")
+    else:
+        st.caption(
+            "在 `.env` 里按 `<引擎名>_BASE_URL` / `_API_KEY` / `_MODEL` 配好引擎,"
+            "再用 `GEO_ENGINES=DEEPSEEK,MOONSHOT` 列出要采哪几个。"
+        )
+        for geo_prefix in [p.strip().upper() for p in os.getenv("GEO_ENGINES", "").split(",") if p.strip()]:
+            try:
+                geo_engines.append(from_env(geo_prefix))
+            except EngineError as exc:
+                st.warning(f"{geo_prefix}: {exc.detail}")
+
+    geo_default_qs = "\n".join(sorted({q for e in geo_engines for q in e.questions}))
+    geo_c1, geo_c2, geo_c3 = st.columns([2, 2, 1])
+    geo_brand = geo_c1.text_input("品牌名", value="NovaBrew" if geo_mode.startswith("🎬") else "")
+    geo_aliases_raw = geo_c2.text_input("别名(逗号分隔,可留空)", value="")
+    geo_samples = geo_c3.number_input("每问题采样次数", min_value=1, max_value=10, value=3)
+    geo_questions_raw = st.text_area("品牌问题(每行一个)", value=geo_default_qs, height=110)
+
+    if st.button("🚀 开始采集", type="primary", key="geo_run",
+                 disabled=not geo_engines or not geo_brand.strip()):
+        geo_qs = [q.strip() for q in geo_questions_raw.splitlines() if q.strip()]
+        if not geo_qs:
+            st.error("至少要有一个问题。")
+        else:
+            geo_bar = st.progress(0.0, text="采集开始…")
+            with st.status(
+                f"采集 {len(geo_engines)} 引擎 × {len(geo_qs)} 问题 × {geo_samples} 次采样",
+                expanded=False,
+            ) as geo_status:
+                geo_out = collect(
+                    geo_engines, geo_qs, samples=int(geo_samples),
+                    progress=lambda d, t: geo_bar.progress(d / t, text=f"{d}/{t} 个采样点"),
+                )
+                geo_status.update(
+                    label=f"采集完成 · `{geo_out['run_id']}` · 队列 {geo_out['stats']}",
+                    state="complete",
+                )
+            geo_bar.empty()
+            st.session_state["geo_metrics"] = compute(
+                geo_out["answers"], geo_brand.strip(),
+                [a.strip() for a in geo_aliases_raw.split(",") if a.strip()],
+                planned={e.name: len(geo_qs) * int(geo_samples) for e in geo_engines},
+            )
+            st.session_state["geo_brand"] = geo_brand.strip()
+            st.session_state["geo_run_id"] = geo_out["run_id"]
+            st.session_state["geo_stats"] = geo_out["stats"]
+            st.session_state["geo_dead"] = geo_out["dead"]
+
+    geo_metrics = st.session_state.get("geo_metrics")
+    if geo_metrics:
+        geo_b = st.session_state["geo_brand"]
+        geo_s = summary(geo_metrics, geo_b)
+        gc1, gc2, gc3, gc4 = st.columns(4)
+        gc1.metric("有效样本", f"{geo_s['ok']}/{geo_s['planned']}", f"覆盖率 {geo_s['coverage']:.0%}")
+        gc2.metric("提及率", f"{geo_s['mention_rate']:.0%}", help="有效样本里提到品牌的占比")
+        gc3.metric("进榜率", f"{geo_s['rank_rate']:.0%}", help="不但提到,而且进了推荐列表")
+        gc4.metric("平均位次",
+                   f"#{geo_s['avg_position']:.1f}" if geo_s["avg_position"] is not None else "—")
+
+        st.code(format_report(geo_metrics, geo_b), language=None)
+        st.caption(
+            f"`{st.session_state['geo_run_id']}`　队列 {st.session_state['geo_stats']}　"
+            "同一批问题再点一次不会重采(run_id 相同 → 队列里已完成的任务直接跳过)。"
+        )
+        if st.session_state.get("geo_dead"):
+            st.warning(f"队列里彻底失败的任务:{list(st.session_state['geo_dead'])}"
+                       "　(已补成失败记录,不会悄悄消失)")
+
+        for geo_m in geo_metrics:
+            if not geo_m.evidence_ids:
+                continue
+            with st.expander(f"🔍 溯源 · {geo_m.engine}　"
+                             f"{len(geo_m.evidence_ids)} 条「提到」的原文"):
+                st.caption("指标是派生数据,原文才是一手数据 —— 每个数字都能点回产生它的那次采样。")
+                for geo_aid in geo_m.evidence_ids:
+                    geo_raw = AnswerStore().get(geo_aid)
+                    if geo_raw is None:
+                        continue
+                    st.markdown(f"**`answer_id={geo_raw.id}`**　"
+                                f"模型 `{geo_raw.model}`　采样 #{geo_raw.sample}　{geo_raw.latency_ms} ms")
+                    st.caption(f"问题:{geo_raw.question}")
+                    st.text(geo_raw.text[:700])
+                    if geo_raw.citations:
+                        st.caption("引用源:" + "　".join(geo_raw.citations))
+                    st.divider()
 
 # ---------------- 历史记录 ----------------
 with tab_history:

@@ -24,6 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      # 47 个用例全部是纯函数与假 LLM,不需要 DEEPSEEK_API_KEY。
+      # 150 个用例全部是纯函数与假引擎/录制回放,不需要 DEEPSEEK_API_KEY,
+      # 也不联网(多引擎采集那一层走 engines/recordings/ 的录制)。
       - name: 跑测试
         run: pytest -q
