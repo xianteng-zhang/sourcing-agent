@@ -48,8 +48,8 @@ from engines.occupancy import (
     format_occupancy,
     occupancy,
 )
-from engines.openai_compat import OpenAICompatEngine, from_env
-from engines.replay import ReplayEngine, dump_jsonl, load_recordings
+from engines.openai_compat import OpenAICompatEngine, discover_prefixes, from_env
+from engines.replay import ReplayEngine, dump_jsonl, known_questions, load_recordings
 from engines.store import AnswerStore
 
 __all__ = [
@@ -57,7 +57,8 @@ __all__ = [
     "EngineMetrics", "FailureKind", "Mention", "OccupancyReport",
     "OpenAICompatEngine", "QuestionMetrics", "QuestionOccupancy", "ReplayEngine",
     "Slot", "analyze", "check_comparability", "collect", "compute",
-    "default_run_id", "dump_jsonl", "extract_citations", "find_mention",
-    "format_occupancy", "format_report", "from_env", "list_items",
-    "load_recordings", "occupancy", "plan_tasks", "safe_ask", "summary",
+    "default_run_id", "discover_prefixes", "dump_jsonl", "extract_citations",
+    "find_mention", "format_occupancy", "format_report", "from_env",
+    "known_questions", "list_items", "load_recordings", "occupancy",
+    "plan_tasks", "safe_ask", "summary",
 ]

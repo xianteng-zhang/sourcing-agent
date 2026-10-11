@@ -79,3 +79,19 @@ def load_recordings(names: list[str] | None = None) -> list[ReplayEngine]:
             continue
         engines.append(ReplayEngine.from_jsonl(path.stem, path))
     return engines
+
+
+def known_questions(engines) -> list[str]:
+    """从这批引擎里能预填的全部问题（去重排序）。
+
+    **「问题」只有录制回放有** —— 它录的就是某几道题的答案。真实引擎不认识
+    任何预置问题，所以这里用 `getattr` 兜底，而不是假设每个引擎都有
+    `.questions`。
+
+    这个兜底不是防御性编程的洁癖：漏了它，界面一切到「真实引擎」就会抛
+    `AttributeError` 把整个 app 打崩 —— 而只测回放模式是发现不了的。
+    """
+    out: set[str] = set()
+    for e in engines:
+        out.update(getattr(e, "questions", None) or [])
+    return sorted(out)

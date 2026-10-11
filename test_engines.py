@@ -28,11 +28,14 @@ from engines import (
     collect,
     compute,
     default_run_id,
+    discover_prefixes,
     dump_jsonl,
     extract_citations,
     find_mention,
     format_occupancy,
     format_report,
+    from_env,
+    known_questions,
     list_items,
     load_recordings,
     occupancy,
@@ -595,3 +598,88 @@ def test_occupancy_on_the_demo_recordings(demo_engines, queue, store):
     assert "AeroPress Go" in text, "漏看的对手必须出现在报告里"
     assert "没有稳定偏好" in text
     assert "?Outin Nano" in text, "没认出来的项在占位表里要带 ? 标出来"
+
+
+# ============================================================ 真实引擎的配置发现
+
+def test_discover_prefixes_needs_all_three_vars(monkeypatch):
+    """只配了 key 不算数。
+
+    环境里带 `_API_KEY` 的变量太多了(各种 SDK、云服务),只认 key 会误判一堆
+    出来。所以要求 BASE_URL / API_KEY / MODEL 三项齐全。
+    """
+    monkeypatch.setenv("AAA_BASE_URL", "https://a.example")
+    monkeypatch.setenv("AAA_API_KEY", "sk-a")
+    monkeypatch.setenv("AAA_MODEL", "m-a")
+
+    monkeypatch.setenv("BBB_API_KEY", "sk-b")          # 只配了 key
+    for k in ("BBB_BASE_URL", "BBB_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+
+    monkeypatch.setenv("CCC_BASE_URL", "https://c.example")
+    monkeypatch.setenv("CCC_API_KEY", "")
+    monkeypatch.setenv("CCC_MODEL", "m-c")             # key 是空串
+
+    found = discover_prefixes()
+    assert "AAA" in found
+    assert "BBB" not in found, "只配了 key 的前缀被误认成引擎"
+    assert "CCC" not in found, "空字符串的配置被当成了有效配置"
+
+
+def test_a_discovered_prefix_can_actually_build_an_engine(monkeypatch):
+    """自动发现的名单必须真的能建出引擎 —— 否则「配了就可用」是句空话。"""
+    monkeypatch.setenv("ZZZ_BASE_URL", "https://z.example/v1")
+    monkeypatch.setenv("ZZZ_API_KEY", "sk-z")
+    monkeypatch.setenv("ZZZ_MODEL", "z-model")
+
+    assert "ZZZ" in discover_prefixes()
+    engine = from_env("ZZZ")
+    assert engine.name == "zzz"
+    assert engine.base_url == "https://z.example/v1"
+    assert engine.model == "z-model"
+
+
+def test_known_questions_tolerates_engines_that_have_no_questions():
+    """回归。`.questions` 只有录制回放有,真实引擎没有。
+
+    这里漏了兜底的话,界面一切到「真实引擎」就 AttributeError 把整个 app
+    打崩 —— 而**只测回放模式是永远发现不了的**。
+    """
+    class Real:
+        name = "real"
+
+        def ask(self, question, sample=0):  # pragma: no cover - 本用例不调用
+            raise NotImplementedError
+
+    replay = ReplayEngine("r", [
+        {"engine": "r", "question": "q2", "sample": 0, "text": "x"},
+        {"engine": "r", "question": "q1", "sample": 0, "text": "y"},
+    ])
+
+    assert known_questions([Real()]) == [], "真实引擎不该被假设有 .questions"
+    assert known_questions([replay, Real()]) == ["q1", "q2"], "应当取并集并排序"
+    assert known_questions([]) == []
+
+
+def test_the_app_survives_switching_to_the_real_engine_mode(demo_engines):
+    """端到端回归:切到真实引擎模式不能崩。
+
+    用 AppTest 真的把界面跑一遍 —— 纯函数测试全绿也不代表分支切过去没事,
+    上一个 bug 就是这么漏掉的。
+    """
+    import os
+
+    from streamlit.testing.v1 import AppTest
+
+    # 造一个「配齐了」的假引擎前缀,让自动发现能认出它(不会真的发请求)
+    for k, v in (("FAKE_BASE_URL", "https://fake.example/v1"),
+                 ("FAKE_API_KEY", "sk-fake"), ("FAKE_MODEL", "fake-1")):
+        os.environ[k] = v
+    try:
+        at = AppTest.from_file("app.py", default_timeout=240)
+        at.run()
+        at.radio(key="geo_mode").set_value("🌐 真实引擎").run()
+        assert not at.exception, [e.value for e in at.exception]
+    finally:
+        for k in ("FAKE_BASE_URL", "FAKE_API_KEY", "FAKE_MODEL"):
+            os.environ.pop(k, None)

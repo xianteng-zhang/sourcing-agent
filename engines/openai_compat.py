@@ -109,6 +109,10 @@ def from_env(prefix: str, name: str | None = None, **kwargs) -> OpenAICompatEngi
 
     例如 prefix="DEEPSEEK" 会读 DEEPSEEK_BASE_URL / DEEPSEEK_API_KEY /
     DEEPSEEK_MODEL。加一个引擎通常只是加三个环境变量，不用写代码。
+
+    **一把 key 就能跑。** 不需要「多个 key」才能用这个模块 —— 采几个引擎
+    就需要几把 key，但采一个引擎完全够把整条链路(采集 → 落库 → 口径 → 占位)
+    跑通。只是那样叫「多引擎」就名不副实了。
     """
     base_url = os.getenv(f"{prefix}_BASE_URL", "")
     api_key = os.getenv(f"{prefix}_API_KEY", "")
@@ -122,3 +126,30 @@ def from_env(prefix: str, name: str | None = None, **kwargs) -> OpenAICompatEngi
         )
     return OpenAICompatEngine(name=name or prefix.lower(), base_url=base_url,
                               api_key=api_key, model=model, **kwargs)
+
+
+#: 一个引擎要配齐这三项才算数
+_SUFFIXES = ("_BASE_URL", "_API_KEY", "_MODEL")
+
+
+def discover_prefixes() -> list[str]:
+    """扫环境变量，找出所有**配齐了三项**的引擎前缀。
+
+    为什么要这个：如果只认 `GEO_ENGINES` 那份手工名单，`.env` 里明明已经
+    配好 DeepSeek 了，界面上按钮还是灰的，而且**不说为什么**。
+    自动发现让「配了就可用」，少一处会忘记同步的地方。
+
+    要求三项齐全而不是只认 `_API_KEY`：环境里带 `_API_KEY` 的变量太多了
+    （各种 SDK、云服务），只认 key 会误判一堆出来。
+    """
+    candidates = set()
+    for name, value in os.environ.items():
+        if not (value or "").strip():
+            continue
+        for suffix in _SUFFIXES:
+            if name.endswith(suffix):
+                candidates.add(name[: -len(suffix)])
+    return sorted(
+        p for p in candidates
+        if p and all((os.getenv(p + s) or "").strip() for s in _SUFFIXES)
+    )

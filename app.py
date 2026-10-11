@@ -24,10 +24,12 @@ from engines import (
     EngineError,
     collect,
     compute,
+    discover_prefixes,
     format_occupancy,
     format_report,
     from_env,
     load_recordings,
+    known_questions,
     occupancy,
     summary,
 )
@@ -516,16 +518,36 @@ with tab_geo:
             st.warning("engines/recordings/ 下没有录制文件。")
     else:
         st.caption(
-            "在 `.env` 里按 `<引擎名>_BASE_URL` / `_API_KEY` / `_MODEL` 配好引擎,"
-            "再用 `GEO_ENGINES=DEEPSEEK,MOONSHOT` 列出要采哪几个。"
+            "在 `.env` 里按 `<引擎名>_BASE_URL` / `_API_KEY` / `_MODEL` 配好引擎即可 —— "
+            "**采一个引擎也够跑通整条链路**。想采多个才需要多把 key;"
+            "也可以用 `GEO_ENGINES=DEEPSEEK,MOONSHOT` 显式指定采哪几个。"
         )
-        for geo_prefix in [p.strip().upper() for p in os.getenv("GEO_ENGINES", "").split(",") if p.strip()]:
+        # 没显式指定就自动发现:配了就可用,少一处会忘记同步的名单
+        geo_prefixes = [p.strip().upper()
+                        for p in os.getenv("GEO_ENGINES", "").split(",") if p.strip()]
+        if geo_prefixes:
+            st.caption(f"按 `GEO_ENGINES` 指定:{', '.join(geo_prefixes)}")
+        else:
+            geo_prefixes = discover_prefixes()
+            if geo_prefixes:
+                st.caption(f"未设 `GEO_ENGINES`,自动发现已配齐的引擎:{', '.join(geo_prefixes)}")
+
+        for geo_prefix in geo_prefixes:
             try:
                 geo_engines.append(from_env(geo_prefix))
             except EngineError as exc:
                 st.warning(f"{geo_prefix}: {exc.detail}")
+        if not geo_prefixes:
+            st.info(
+                "没找到配齐的引擎。在项目根目录的 `.env` 里加三项就能用:\n\n"
+                "```\nDEEPSEEK_API_KEY=sk-...\n"
+                "DEEPSEEK_BASE_URL=https://api.deepseek.com\n"
+                "DEEPSEEK_MODEL=deepseek-chat\n```\n\n"
+                "换别的厂商同理(如 `MOONSHOT_*` / `DASHSCOPE_*`),前缀随便取,三项齐了就会被发现。"
+            )
 
-    geo_default_qs = "\n".join(sorted({q for e in geo_engines for q in e.questions}))
+    # 只有录制回放有「预置问题」;真实引擎不认识任何问题,所以这里兜底成空
+    geo_default_qs = "\n".join(known_questions(geo_engines))
     geo_c1, geo_c2, geo_c3 = st.columns([2, 2, 1])
     geo_brand = geo_c1.text_input(
         "我的品牌", value="NovaBrew" if geo_demo else "",
@@ -538,7 +560,11 @@ with tab_geo:
         value="\n".join(["NovaBrew", "Wacaco Nanopresso", "Staresso MiNi"]) if geo_demo else "",
         height=90,
         help="只列你已经知道的。AI 还会推荐别的品牌,那些会单独列出来 —— 那才是你漏看的对手。")
-    geo_questions_raw = st.text_area("类目问题(每行一个)", value=geo_default_qs, height=110)
+    geo_questions_raw = st.text_area(
+        "类目问题(每行一个)", value=geo_default_qs, height=110,
+        placeholder="买家真的会去问 AI 的那种问题,比如\n"
+                    "What is the best portable espresso maker for travel?\n"
+                    "Which compact coffee maker should I buy for camping?")
 
     if st.button("🚀 开始采集", type="primary", key="geo_run",
                  disabled=not geo_engines or not geo_brand.strip()):
