@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from engines.base import Answer, Engine, FailureKind, safe_ask
+from engines.base import RETRYABLE, Answer, Engine, EngineError, FailureKind, safe_ask
 from engines.metrics import compute, format_report
 from engines.store import DEFAULT_STORE, AnswerStore
 from jobs import DEFAULT_QUEUE, JobQueue, run_durable
@@ -52,9 +52,13 @@ def collect(
     queue: JobQueue | None = None,
     store: AnswerStore | None = None,
     max_workers: int = 4,
+    max_attempts: int = 3,
     progress=None,
 ) -> dict:
     """采一批答案，落库，返回可复现的结果。
+
+    `max_attempts` 是每个采样点的重试上限。有了退避(2s/4s/8s…),这个旋钮
+    才真正可用 —— 以前是立刻重试,多给几次也只是多撞几次墙。
 
     返回 {"run_id", "answers", "metrics", "summary", "stats", "dead"}。
     """
@@ -67,22 +71,33 @@ def collect(
     payload_of = dict(tasks)
 
     def run_one(payload: dict) -> dict:
-        return safe_ask(by_name[payload["engine"]],
-                        payload["question"], payload["sample"]).to_dict()
+        ans = safe_ask(by_name[payload["engine"]],
+                       payload["question"], payload["sample"])
+        # **可重试**的失败必须抛出去交给队列 —— 只有队列懂退避和重试上限。
+        #
+        # 这里吞成数据的话,队列会以为这个采样成功了。实测跑 Kimi 时就是这样:
+        # 3 次 429 全被吞成 Answer,队列状态显示 done:8 / dead:0,看着一切正常,
+        # 而队列的退避与重试**一次都没被触发过**。
+        #
+        # 不可重试的(解析失败 / 鉴权 / 被拦)重试也没用,直接落成数据。
+        if not ans.ok and ans.error in RETRYABLE:
+            raise EngineError(ans.error, ans.error_detail)
+        return ans.to_dict()
 
     out = run_durable(queue, run_id, tasks, run_one, max_workers=max_workers,
-                      progress=progress)
+                      max_attempts=max_attempts, progress=progress)
 
     answers = [Answer.from_dict(d) for d in out["results"].values()]
 
-    # 队列里彻底失败的任务：补一条失败 Answer，否则它既不进分子也不进分母。
+    # 队列里彻底失败(重试用尽)的任务:补一条失败 Answer。
+    # 否则它既不进分子也不进分母,指标会悄悄变好看。
     for key, err in out["failed"].items():
         p = payload_of.get(key)
         if p is None:
             continue
         answers.append(Answer(engine=p["engine"], question=p["question"],
-                              sample=p["sample"], error=FailureKind.UNKNOWN,
-                              error_detail=f"任务未完成: {err}"))
+                              sample=p["sample"], error=_kind_from_dead(err),
+                              error_detail=f"重试用尽: {err}"))
 
     store.save_many(run_id, answers)
     stored = store.load(run_id)  # 取回带 id 的版本 —— 指标要靠 id 溯源
@@ -97,6 +112,19 @@ def collect(
 
 def _planned(engines: list[Engine], questions: list[str], samples: int) -> dict[str, int]:
     return {e.name: len(questions) * samples for e in engines}
+
+
+def _kind_from_dead(error: str) -> FailureKind:
+    """从队列留下的错误串里还原失败分类。
+
+    做法有点丑(在字符串里找分类名),但比把「限流」一律记成「未知」强 ——
+    失败分类是给人看的归因,归因错了,后面所有统计都跟着错。
+    """
+    low = error.lower()
+    for kind in FailureKind:
+        if kind.value in low:
+            return kind
+    return FailureKind.UNKNOWN
 
 
 def analyze(run_id: str, brand: str, aliases: list[str] | None = None,

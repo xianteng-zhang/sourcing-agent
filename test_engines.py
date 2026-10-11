@@ -65,7 +65,8 @@ def store(tmp_path) -> AnswerStore:
 
 @pytest.fixture()
 def queue(tmp_path) -> JobQueue:
-    return JobQueue(tmp_path / "jobs.db")
+    # 退避压到 0.01 秒:真实值会让每个涉及重试的用例真等好几秒
+    return JobQueue(tmp_path / "jobs.db", backoff_base=0.01, backoff_cap=0.02)
 
 
 @pytest.fixture()
@@ -329,12 +330,18 @@ class _Counting:
 
 
 def test_second_run_with_same_id_recollects_nothing(demo_engines, queue, store):
-    """靠队列 + 落库双重幂等：重跑不重采，不重花钱。"""
+    """靠队列 + 落库双重幂等：重跑不重采，不重花钱。
+
+    注意 `DONE=11 / DEAD=1`:录制里那条 429 是**可重试**的失败,现在会被真的
+    重试(重试上限次),用尽后落 dead。这正是想要的 —— 以前它被 safe_ask 吞成
+    一条失败 Answer,队列看到的是「成功」,重试机制形同虚设。
+    """
     questions = sorted({q for e in demo_engines for q in e.questions})
 
     first = collect(demo_engines, questions, samples=3, queue=queue, store=store)
-    assert first["stats"][DONE] == 12
-    assert len(first["answers"]) == 12
+    assert first["stats"][DONE] == 11
+    assert first["stats"][DEAD] == 1, "可重试的 429 应当被真的重试到落 dead"
+    assert len(first["answers"]) == 12, "落 dead 的那条也要补成失败记录,不能消失"
 
     counted = [_Counting(e) for e in demo_engines]
     again = collect(counted, questions, samples=3, run_id=first["run_id"],
@@ -761,3 +768,71 @@ def test_temperature_can_be_configured_per_engine(monkeypatch):
     with pytest.raises(EngineError) as ei:
         from_env("TT")
     assert "不是数字" in ei.value.detail
+
+
+# ============================================================ 可重试的失败要真的被重试
+#
+# 这是**真实跑 Kimi 才暴露**的一组问题:429 被 safe_ask 吞成一条失败 Answer,
+# 队列看到的是「成功」—— 状态显示 done:8/dead:0,退避和重试机制一次都没触发过。
+
+class _Flaky:
+    """前 `fail_times` 次抛 429,之后就正常。用来证明重试真的发生了。"""
+
+    def __init__(self, name: str, fail_times: int) -> None:
+        self.name = name
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def ask(self, question: str, sample: int = 0) -> Answer:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise EngineError(FailureKind.RATE_LIMIT, "429 Too Many Requests")
+        return Answer(engine=self.name, question=question, sample=sample, text="1. Acme")
+
+
+def test_a_retryable_failure_is_actually_retried(queue, store):
+    """回归。原先 429 被 `safe_ask` 吞成数据,队列以为成功了,重试形同虚设。"""
+    engine = _Flaky("flaky", fail_times=2)
+
+    out = collect([engine], ["q1"], samples=1, queue=queue, store=store)
+
+    assert engine.calls == 3, f"429 该被真的重试到第 3 次,实际只调了 {engine.calls} 次"
+    assert out["stats"][DONE] == 1
+    assert out["stats"][DEAD] == 0
+    assert out["answers"][0].ok, "重试成功后应当拿到一条正常答案"
+
+
+def test_retries_exhausted_land_in_dead_and_still_leave_a_record(queue, store):
+    """重试用尽必须落 dead,而且**仍要留一条失败记录** —— 不能凭空消失。"""
+    engine = _Flaky("flaky", fail_times=99)
+
+    out = collect([engine], ["q1"], samples=1, queue=queue, store=store,
+                  max_attempts=2)
+
+    assert engine.calls == 2, "重试上限是 2,就只该调 2 次"
+    assert out["stats"][DEAD] == 1
+    assert len(out["answers"]) == 1
+    assert out["answers"][0].error is FailureKind.RATE_LIMIT, \
+        "失败分类要能从队列留下的错误串里还原,不能一律记成 unknown"
+
+
+def test_a_non_retryable_failure_is_not_retried(queue, store):
+    """解析失败重试也没用 —— 它该直接落成数据,不该浪费重试额度。"""
+
+    class _ParseFail:
+        name = "parsefail"
+
+        def __init__(self):
+            self.calls = 0
+
+        def ask(self, question, sample=0):
+            self.calls += 1
+            raise EngineError(FailureKind.PARSE, "响应正文为空")
+
+    engine = _ParseFail()
+    out = collect([engine], ["q1"], samples=1, queue=queue, store=store)
+
+    assert engine.calls == 1, "不可重试的失败被重试了,白烧额度"
+    assert out["stats"][DONE] == 1
+    assert out["stats"][DEAD] == 0
+    assert out["answers"][0].error is FailureKind.PARSE

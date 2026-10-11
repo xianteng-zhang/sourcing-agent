@@ -18,6 +18,7 @@
 worker 能拿到写锁,抢不到的行不会被重复领取。
 """
 import json
+import random
 import sqlite3
 import threading
 import time
@@ -28,16 +29,43 @@ DB_PATH = Path(__file__).parent / "data" / "jobs.db"
 
 PENDING, RUNNING, DONE, DEAD = "pending", "running", "done", "dead"
 
+#: 指数退避:第 n 次失败后等 `base * 2^(n-1)` 秒,上限 cap。
+#:
+#: **为什么要退避**:失败了立刻重试等于没重试 —— 尤其是 429,同一堵墙会连撞
+#: 三次,三次额度全烧掉。接第二个厂商(真实跑 Kimi)时就是这么被打的。
+BACKOFF_BASE = 2.0
+BACKOFF_CAP = 60.0
+
 
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def backoff_delay(attempts: int, base: float = BACKOFF_BASE,
+                  cap: float = BACKOFF_CAP, rand=random.random) -> float:
+    """第 `attempts` 次失败之后,该等多少秒再试。
+
+    **为什么要抖动**:多个 worker 同时被限流,如果都精确等 `2^n` 秒,它们会
+    **同时醒来再一起撞上去**(thundering herd)。所以用「等比例抖动」——
+    保证至少等一半,另一半随机,把重试时间摊开。
+
+    `rand` 可注入,为了让测试能拿确定性结果。
+    """
+    nominal = min(cap, base * (2 ** max(0, attempts - 1)))
+    return nominal / 2 + rand() * nominal / 2
+
+
 class JobQueue:
     """SQLite 上的持久化任务队列。一个实例对应一个库文件(测试可传临时路径)。"""
 
-    def __init__(self, db_path: Path | str | None = None) -> None:
+    def __init__(self, db_path: Path | str | None = None,
+                 backoff_base: float = BACKOFF_BASE,
+                 backoff_cap: float = BACKOFF_CAP) -> None:
         self.db_path = Path(db_path) if db_path else DB_PATH
+        #: 退避参数做成实例属性,测试才能把它压到 0.01 秒 ——
+        #: 否则每跑一次重试测试就要真等好几秒。
+        self.backoff_base = backoff_base
+        self.backoff_cap = backoff_cap
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,6 +90,7 @@ class JobQueue:
                     max_attempts  INTEGER NOT NULL DEFAULT 3,
                     lease_owner   TEXT,
                     lease_expires REAL,
+                    next_attempt_at REAL,
                     result_json   TEXT,
                     error         TEXT,
                     created_at    TEXT    NOT NULL,
@@ -71,6 +100,10 @@ class JobQueue:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(state, run_id)")
+            # 老库补列:CREATE TABLE IF NOT EXISTS 不会给已存在的表加字段。
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+            if "next_attempt_at" not in cols:
+                conn.execute("ALTER TABLE jobs ADD COLUMN next_attempt_at REAL")
         finally:
             conn.close()
 
@@ -100,7 +133,10 @@ class JobQueue:
 
     def claim(self, owner: str, run_id: str | None = None,
               lease_seconds: float = 300, now: float | None = None) -> dict | None:
-        """原子领取一个 pending 任务,并给它打上租约。没有可领的返回 None。"""
+        """原子领取一个 pending 任务,并给它打上租约。没有可领的返回 None。
+
+        **退避中的任务领不到** —— 这是退避能生效的关键:失败了立刻重试等于没重试。
+        """
         self.init_db()
         now = time.time() if now is None else now
         conn = self._connect()
@@ -108,8 +144,9 @@ class JobQueue:
             conn.execute("BEGIN IMMEDIATE")  # 拿到写锁,杜绝两人领同一条
             row = conn.execute(
                 "SELECT * FROM jobs WHERE state = ? AND (? IS NULL OR run_id = ?) "
+                "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
                 "ORDER BY id LIMIT 1",
-                (PENDING, run_id, run_id),
+                (PENDING, run_id, run_id, now),
             ).fetchone()
             if row is None:
                 conn.execute("COMMIT")
@@ -131,6 +168,28 @@ class JobQueue:
         job["payload"] = json.loads(job.pop("payload_json"))
         return job
 
+    def next_attempt_in(self, run_id: str, now: float | None = None) -> float | None:
+        """还有 pending 任务的话,距离最近一个变成可领取还有多少秒。
+
+        为什么需要它:有了退避,"领不到任务"就有两种含义 ——
+        **活干完了**,或者**剩下的都在退避中**。分不清的话 worker 会提前收工,
+        把还在退避的任务丢在那儿不管。返回 None 才表示真的没活了。
+        """
+        self.init_db()
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT MIN(COALESCE(next_attempt_at, 0)) AS t, COUNT(*) AS n "
+                "FROM jobs WHERE run_id = ? AND state = ?",
+                (run_id, PENDING),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None or not row["n"]:
+            return None
+        return max(0.0, float(row["t"] or 0) - now)
+
     # ------------------------------------------------------ 完成 / 失败
 
     def complete(self, job_id: int, result: dict) -> None:
@@ -139,18 +198,24 @@ class JobQueue:
         try:
             conn.execute(
                 "UPDATE jobs SET state = ?, result_json = ?, error = NULL, "
-                "lease_owner = NULL, lease_expires = NULL, updated_at = ? WHERE id = ?",
+                "lease_owner = NULL, lease_expires = NULL, next_attempt_at = NULL, "
+                "updated_at = ? WHERE id = ?",
                 (DONE, json.dumps(result, ensure_ascii=False), _now_iso(), job_id),
             )
         finally:
             conn.close()
 
-    def fail(self, job_id: int, error: str) -> str:
-        """记一次失败:还有重试额度就退回 pending(换个 worker 再来),否则落 dead。
+    def fail(self, job_id: int, error: str, now: float | None = None) -> str:
+        """记一次失败:还有重试额度就退回 pending(**但要等一会儿**),否则落 dead。
 
         返回该任务的新状态,便于调用方与测试断言。
+
+        退避多久由 `backoff_delay(attempts)` 决定:2s、4s、8s… 上限 60s,
+        并带等比例抖动。退避时间写在 `next_attempt_at` 上,`claim()` 会跳过
+        还没到点的任务 —— 所以「退回 pending」不再等于「马上被重领」。
         """
         self.init_db()
+        now = time.time() if now is None else now
         conn = self._connect()
         try:
             row = conn.execute(
@@ -159,10 +224,15 @@ class JobQueue:
             if row is None:
                 return DEAD
             state = PENDING if row["attempts"] < row["max_attempts"] else DEAD
+            ready_at = None
+            if state == PENDING:
+                ready_at = now + backoff_delay(row["attempts"],
+                                               base=self.backoff_base,
+                                               cap=self.backoff_cap)
             conn.execute(
                 "UPDATE jobs SET state = ?, error = ?, lease_owner = NULL, "
-                "lease_expires = NULL, updated_at = ? WHERE id = ?",
-                (state, error, _now_iso(), job_id),
+                "lease_expires = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ?",
+                (state, error, ready_at, _now_iso(), job_id),
             )
             return state
         finally:
@@ -175,6 +245,9 @@ class JobQueue:
 
         进程崩溃后没人主动归还任务,所以必须由下一个启动者做这件事 ——
         判断依据只能是「租约到期了」,而不是「进程还在不在」。
+
+        这里**清掉退避**(`next_attempt_at = NULL`),让回收后能立刻重跑:
+        崩溃恢复要的是尽快接上,而崩溃循环本身已经被租约时长节流了。
         """
         self.init_db()
         now = time.time() if now is None else now
@@ -190,7 +263,8 @@ class JobQueue:
                 state = PENDING if r["attempts"] < r["max_attempts"] else DEAD
                 conn.execute(
                     "UPDATE jobs SET state = ?, lease_owner = NULL, lease_expires = NULL, "
-                    "error = COALESCE(error, '租约过期,已回收'), updated_at = ? WHERE id = ?",
+                    "error = COALESCE(error, '租约过期,已回收'), next_attempt_at = NULL, "
+                    "updated_at = ? WHERE id = ?",
                     (state, _now_iso(), r["id"]),
                 )
                 reaped.append(r["key"])
@@ -290,14 +364,22 @@ def run_durable(
         while not stop.is_set():
             job = queue.claim(owner, run_id=run_id, lease_seconds=lease_seconds)
             if job is None:
-                return
+                # "领不到"现在有两种含义:**活干完了**,或者**剩下的都在退避中**。
+                # 分不清的话 worker 会提前收工,把还在退避的任务丢在那儿没人管
+                # —— 加了退避之后这是最容易漏的一处。
+                delay = queue.next_attempt_in(run_id)
+                if delay is None:
+                    return  # 真的没活了
+                time.sleep(min(max(delay, 0.05), 2.0))
+                continue
+
             key = job["key"]
             try:
                 result = run_one(job["payload"])
             except Exception as exc:  # noqa: BLE001 - 交给队列决定重试还是落 dead
                 detail = f"{type(exc).__name__}: {exc}"
                 if queue.fail(job["id"], detail) != DEAD:
-                    continue  # 还有重试额度,退回 pending 等下一次领
+                    continue  # 还有重试额度,退回 pending(队列已给它排了退避)
                 with lock:
                     failures[key] = detail
                     done_count += 1

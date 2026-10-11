@@ -7,7 +7,10 @@ from langchain_openai import ChatOpenAI
 load_dotenv()
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+#: 当前官方模型名(定价页:https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)。
+#: 老名字 `deepseek-chat` 已不在官方表里 —— 实测仍可调用、由 V4.1-Flash 提供服务,
+#: 但遗留别名哪天消失是不通知的,所以默认值用当前名。
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
 

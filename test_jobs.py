@@ -17,7 +17,8 @@ from jobs import DEAD, DONE, PENDING, RUNNING, JobQueue, run_durable
 
 @pytest.fixture()
 def queue(tmp_path):
-    return JobQueue(tmp_path / "jobs.db")
+    # 退避压到 0.01 秒:真实值(2s/4s/8s…)会让每次重试测试都真等好几秒
+    return JobQueue(tmp_path / "jobs.db", backoff_base=0.01, backoff_cap=0.02)
 
 
 # ------------------------------------------------------------------ 入队
@@ -103,15 +104,69 @@ def test_fail_requeues_then_goes_dead_after_max_attempts(queue):
     queue.enqueue("r1", "a", {}, max_attempts=3)
 
     states = []
+    # 每次失败后要**越过退避时间**才领得到 —— 这正是退避在起作用
+    now = 10_000.0
     for _ in range(3):
-        job = queue.claim("w1", run_id="r1")
-        assert job is not None, "还有重试额度时应当可再次领取"
-        states.append(queue.fail(job["id"], "boom"))
+        job = queue.claim("w1", run_id="r1", now=now)
+        assert job is not None, "越过退避时间后应当可再次领取"
+        states.append(queue.fail(job["id"], "boom", now=now))
+        now += 1.0  # 比 backoff_cap 大,保证已过退避期
 
     assert states == [PENDING, PENDING, DEAD]
     assert queue.stats("r1")[DEAD] == 1
     assert queue.failures("r1") == {"a": "boom"}
     assert queue.claim("w1", run_id="r1") is None, "dead 任务不该再被领取"
+
+
+def test_a_failed_job_is_not_immediately_claimable(queue):
+    """退避的核心:失败了立刻重试等于没重试。
+
+    429 尤其明显 —— 同一堵墙会连撞三次,三次额度全烧掉。
+    """
+    queue.enqueue("r1", "a", {}, max_attempts=3)
+    job = queue.claim("w1", run_id="r1", now=1000.0)
+    queue.fail(job["id"], "429", now=1000.0)
+
+    assert queue.claim("w1", run_id="r1", now=1000.0) is None, "退避期内不该领得到"
+    # 但队列得知道「还有活,只是要等」—— 否则 worker 会提前收工
+    delay = queue.next_attempt_in("r1", now=1000.0)
+    assert delay is not None and delay > 0
+
+    assert queue.claim("w1", run_id="r1", now=1000.0 + delay + 0.01) is not None
+
+
+def test_next_attempt_in_is_none_only_when_there_is_truly_nothing_left(queue):
+    assert queue.next_attempt_in("r1") is None, "空队列应当返回 None"
+
+    queue.enqueue("r1", "a", {})
+    assert queue.next_attempt_in("r1") == 0.0, "没退避的 pending 应当可立即领取"
+
+    job = queue.claim("w1", run_id="r1", now=1000.0)
+    queue.fail(job["id"], "429", now=1000.0)
+    assert queue.next_attempt_in("r1", now=1000.0) > 0, "退避中的任务要报出还要等多久"
+
+
+def test_backoff_grows_exponentially_and_is_capped():
+    """2s → 4s → 8s… 上限 cap。抖动只影响「等多久」不影响「是否递增」。"""
+    from jobs import backoff_delay
+
+    # rand 固定成 0.5,拿确定性结果:delay = nominal/2 + 0.5*nominal/2
+    half = lambda: 0.5  # noqa: E731
+    assert backoff_delay(1, base=2.0, cap=60.0, rand=half) == 1.5   # nominal 2
+    assert backoff_delay(2, base=2.0, cap=60.0, rand=half) == 3.0   # nominal 4
+    assert backoff_delay(3, base=2.0, cap=60.0, rand=half) == 6.0   # nominal 8
+    assert backoff_delay(99, base=2.0, cap=60.0, rand=half) == 45.0  # 被 cap 压住
+
+
+def test_backoff_jitter_never_goes_below_half_or_above_nominal():
+    """等比例抖动:至少等一半,最多等满 —— 保证不会抖到几乎不等待。"""
+    from jobs import backoff_delay
+
+    for attempts in (1, 2, 3):
+        for r in (0.0, 0.25, 0.75, 1.0):
+            d = backoff_delay(attempts, base=2.0, cap=60.0, rand=lambda r=r: r)
+            nominal = min(60.0, 2.0 * 2 ** (attempts - 1))
+            assert nominal / 2 <= d <= nominal
 
 
 # ------------------------------------------------------------------ 回收
@@ -359,3 +414,62 @@ def test_a_task_that_lands_dead_is_counted_exactly_once(queue):
     assert out["failed"]["bad"].startswith("ZeroDivisionError")
     assert out["stats"][DEAD] == 1
     assert out["stats"][PENDING] == 0, "落 dead 之后不该还留在 pending"
+
+
+# -------------------------- 回归:老库要能原地加上新列
+
+def test_migration_adds_next_attempt_at_to_a_legacy_table(tmp_path):
+    """回归。`CREATE TABLE IF NOT EXISTS` **不会**给已存在的表加字段。
+
+    用户的 `data/jobs.db` 是在没有 `next_attempt_at` 的时候建的。升级后如果只靠
+    CREATE TABLE 建表,`claim()` 的 SQL 一引用这个列就会 `no such column` ——
+    而且是在运行到一半才炸。所以必须显式 PRAGMA 检查 + ALTER TABLE。
+    """
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE jobs (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id        TEXT    NOT NULL,
+            key           TEXT    NOT NULL,
+            payload_json  TEXT    NOT NULL,
+            state         TEXT    NOT NULL DEFAULT 'pending',
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            max_attempts  INTEGER NOT NULL DEFAULT 3,
+            lease_owner   TEXT,
+            lease_expires REAL,
+            result_json   TEXT,
+            error         TEXT,
+            created_at    TEXT    NOT NULL,
+            updated_at    TEXT    NOT NULL,
+            UNIQUE(run_id, key)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO jobs (run_id, key, payload_json, state, created_at, updated_at) "
+        "VALUES ('r1', 'a', '{}', 'pending', '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    q = JobQueue(db)
+    q.init_db()  # 项目的约定是懒初始化:__init__ 不建表,各方法自己调 init_db
+    cols = {r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(jobs)")}
+    assert "next_attempt_at" in cols, "老库没被补上新列"
+
+    # 老数据仍然能正常领取和完成
+    job = q.claim("w1", run_id="r1")
+    assert job is not None and job["key"] == "a"
+    q.complete(job["id"], {"ok": True})
+    assert q.stats("r1")[DONE] == 1
+
+
+def test_migration_is_idempotent(tmp_path):
+    q = JobQueue(tmp_path / "j.db")
+    q.init_db()
+    q.init_db()  # 再来一次不该炸
+    assert q.stats("r1") == {PENDING: 0, RUNNING: 0, DONE: 0, DEAD: 0}

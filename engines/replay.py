@@ -24,7 +24,15 @@ RECORDINGS = Path(__file__).parent / "recordings"
 
 
 class ReplayEngine:
-    """按录制回放。命不中录制就抛 EngineError —— 不猜、不编。"""
+    """按录制回放。命不中录制就抛 EngineError —— 不猜、不编。
+
+    **一个诚实的局限**:录制是按 `(问题, 采样序号)` 索引的**单点**结果。
+    所以回放模式下,**重试会拿到同一条失败记录,不会「恢复」** ——
+    重试上限用完就落 dead。真实引擎会重新发起请求,当然可能成功。
+
+    想在测试里验证「重试后成功」,用一个会失败的假引擎
+    (见 `test_engines.py::_Flaky`),而不是靠录制。
+    """
 
     def __init__(self, name: str, records: list[dict]) -> None:
         self.name = name
