@@ -101,7 +101,7 @@ st.title("🛒 跨境电商选品与上架 Agent")
 st.caption("选品 Agent + 评论挖掘 + 竞品对比 + 趋势分析,帮你看清「什么好卖、值不值得做」")
 
 tab_mine, tab_agent, tab_compare, tab_geo, tab_trend, tab_history = st.tabs(
-    ["📊 评论挖掘", "🤖 选品 Agent", "⚔️ 竞品对比", "🌐 AI 可见度", "📈 趋势分析", "📚 历史记录"])
+    ["📊 评论挖掘", "🤖 选品 Agent", "⚔️ 竞品对比", "🧭 类目占位", "📈 趋势分析", "📚 历史记录"])
 
 HOW_TO_CSV = """
 **方法 1:自研评论抓取扩展(推荐,一键导出)**
