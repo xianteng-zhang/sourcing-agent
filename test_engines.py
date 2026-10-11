@@ -436,9 +436,9 @@ def test_demo_recordings_produce_the_documented_numbers(demo_engines, queue, sto
     """演示数据的数字是写死在文档里的，改动录制必须同步改文档。"""
     questions = sorted({q for e in demo_engines for q in e.questions})
     out = collect(demo_engines, questions, samples=3, queue=queue, store=store)
-    metrics = compute(out["answers"], "NovaBrew",
+    metrics = compute(out["answers"], "北辰",
                       planned={"replay-alpha": 6, "replay-beta": 6})
-    s = summary(metrics, "NovaBrew")
+    s = summary(metrics, "北辰")
 
     assert (s["ok"], s["failed"]) == (10, 2)
     assert s["mention_rate"] == pytest.approx(0.7)
@@ -588,13 +588,13 @@ def test_occupancy_on_the_demo_recordings(demo_engines, queue, store):
     questions = sorted({q for e in demo_engines for q in e.questions})
     out = collect(demo_engines, questions, samples=3, queue=queue, store=store)
 
-    rivals = ["NovaBrew", "Wacaco Nanopresso", "Staresso MiNi"]
+    rivals = ["北辰", "Wacaco Nanopresso", "Staresso MiNi"]
     r = occupancy(out["answers"], rivals)
 
     assert r.samples == 10
     by = {s.brand: s for s in r.brands}
     assert (by["Wacaco Nanopresso"].mentioned, by["Wacaco Nanopresso"].ranked) == (10, 6)
-    assert (by["NovaBrew"].mentioned, by["NovaBrew"].ranked, by["NovaBrew"].top1) == (7, 6, 2)
+    assert (by["北辰"].mentioned, by["北辰"].ranked, by["北辰"].top1) == (7, 6, 2)
     assert by["Staresso MiNi"].ranked == 1
     assert dict(r.unknown) == {"AeroPress Go": 3, "Outin Nano": 2}
 

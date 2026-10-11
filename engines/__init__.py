@@ -16,8 +16,8 @@
 
     engines = [ReplayEngine.from_jsonl("alpha", "engines/recordings/replay-alpha.jsonl")]
     out = collect(engines, ["best portable espresso maker?"], samples=3)
-    print(format_report(compute(out["answers"], "NovaBrew"), "NovaBrew"))
-    print(format_occupancy(occupancy(out["answers"], ["NovaBrew", "Wacaco"]), [...]))
+    print(format_report(compute(out["answers"], "北辰"), "北辰"))
+    print(format_occupancy(occupancy(out["answers"], ["北辰", "Wacaco"]), [...]))
 """
 from engines.base import (
     RETRYABLE,

@@ -504,6 +504,10 @@ with tab_geo:
         "头部位次稳不稳、有没有你没想到的对手。"
         "分母只算**有效样本**,引擎失败不会被记成「没提到你」。"
     )
+    st.caption(
+        "💡 真实跨境场景里,买家是用**目标市场的语言**提问的(美国站用英文、德国站用德文…),"
+        "所以问题集要按市场分别配。下面的演示用中文,只是为了让你先看懂机制。"
+    )
 
     geo_mode = st.radio("引擎来源", ["🎬 录制回放(离线演示,不花钱)", "🌐 真实引擎"],
                         horizontal=True, key="geo_mode")
@@ -550,21 +554,21 @@ with tab_geo:
     geo_default_qs = "\n".join(known_questions(geo_engines))
     geo_c1, geo_c2, geo_c3 = st.columns([2, 2, 1])
     geo_brand = geo_c1.text_input(
-        "我的品牌", value="NovaBrew" if geo_demo else "",
-        help="算它的「可见度」:提及率 / 进榜率 / 平均位次")
+        "我的品牌", value="北辰" if geo_demo else "",
+        help="算它的「可见度」:提及率 / 进榜率 / 平均位次。填短一点的词,太长会匹配不到。")
     geo_aliases_raw = geo_c2.text_input("别名(逗号分隔,可留空)", value="")
     geo_samples = geo_c3.number_input("每问题采样次数", min_value=1, max_value=10, value=3)
 
     geo_rivals_raw = st.text_area(
         "类目竞品(每行一个) —— 用来算「推荐位被谁占了」",
-        value="\n".join(["NovaBrew", "Wacaco Nanopresso", "Staresso MiNi"]) if geo_demo else "",
+        value="\n".join(["北辰", "Wacaco Nanopresso", "Staresso MiNi"]) if geo_demo else "",
         height=90,
         help="只列你已经知道的。AI 还会推荐别的品牌,那些会单独列出来 —— 那才是你漏看的对手。")
     geo_questions_raw = st.text_area(
         "类目问题(每行一个)", value=geo_default_qs, height=110,
         placeholder="买家真的会去问 AI 的那种问题,比如\n"
-                    "What is the best portable espresso maker for travel?\n"
-                    "Which compact coffee maker should I buy for camping?")
+                    "旅行用的便携咖啡机,买哪个牌子好?\n"
+                    "露营用的紧凑咖啡机,推荐哪一款?")
 
     if st.button("🚀 开始采集", type="primary", key="geo_run",
                  disabled=not geo_engines or not geo_brand.strip()):
@@ -612,8 +616,15 @@ with tab_geo:
             "同一批问题再点一次不会重采(run_id 相同 → 队列里已完成的任务直接跳过)。"
         )
         if st.session_state.get("geo_dead"):
-            st.warning(f"队列里彻底失败的任务:{list(st.session_state['geo_dead'])}"
-                       "　(已补成失败记录,不会悄悄消失)")
+            geo_dead_keys = list(st.session_state["geo_dead"])
+            st.info(
+                f"**{len(geo_dead_keys)} 个采样点重试用尽后落到 `dead`** → "
+                + "、".join(f"`{k}`" for k in geo_dead_keys)
+                + "\n\n这不是出错,是**重试机制在工作**:可重试的失败(限流 / 超时)"
+                "会按 `2s → 4s → 8s` 退避后重试,用尽后落 `dead`。"
+                "落 `dead` 的采样**仍会补一条失败记录**,"
+                "所以它既不进分子也不进分母 —— 但你看得见。"
+            )
 
         geo_rivals = st.session_state.get("geo_rivals") or []
         geo_answers = st.session_state.get("geo_answers") or []

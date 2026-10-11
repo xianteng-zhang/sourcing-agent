@@ -167,9 +167,9 @@ def demo() -> None:
         return
 
     questions = sorted({q for e in engines for q in e.questions})
-    samples, brand = 3, "NovaBrew"
+    samples, brand = 3, "北辰"
     # 只是举几个「我已经知道的竞品」。AI 还会推荐别的 —— 那正是要看的东西。
-    rivals = ["NovaBrew", "Wacaco Nanopresso", "Staresso MiNi"]
+    rivals = ["北辰", "Wacaco Nanopresso", "Staresso MiNi"]
     planned = _planned(engines, questions, samples)
 
     base = Path(__file__).parent.parent / "data"
