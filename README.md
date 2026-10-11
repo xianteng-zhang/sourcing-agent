@@ -283,6 +283,33 @@ progress() 原先写在 try 里面,而 except 分支做的事是 queue.fail()。
 > **教训**:纯函数测试全绿,不代表把界面点一遍也能跑通。**跨线程 + 回调 +
 > 状态机**这三样凑在一起时,只有真的点一次才发现得了。
 
+### 纯 CSS 的 bug,`AppTest` 抓不到
+
+为了去掉 Streamlit 的开发态痕迹,我一开始把 `[data-testid="stToolbar"]`
+**整个** `display: none` 了。结果:**侧边栏一收起就再也打不开**。
+
+原因很隐蔽 —— 「展开侧边栏」那个按钮(`stExpandSidebarButton`)就住在 toolbar 里面:
+
+```
+stExpandSidebarButton   inToolbar: true   visible: false   w: 0  h: 0   ← 被连带藏了
+```
+
+修法是只藏 Deploy 和右上角菜单,把 toolbar 本身留着:
+
+```css
+#MainMenu,
+[data-testid="stMainMenu"],
+[data-testid="stAppDeployButton"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+footer { display: none !important; }
+```
+
+> **教训**:`AppTest` 只执行 Python 逻辑,**不碰布局**。所以
+> **CSS 类的 bug 它一个都抓不到** —— 只能靠真浏览器点。
+> 定位这种问题最快的办法是查 DOM 而不是看代码:一眼就能看到
+> 「那个按钮确实存在,只是 `visible: false`」。
+
 ## 项目结构
 
 ```
@@ -418,5 +445,6 @@ greenColor / yellowColor / redColor / grayColor / ...
 留给 CSS(`app.py` 里的 `_SKIN`)的只有**配置表达不了的三件事**:
 
 1. **藏掉开发态痕迹** —— `Deploy` / 工具栏 / 页脚。留着它,界面就在替你喊「我是 demo」。
+   ⚠️ 但**不能整个藏 `stToolbar`**:展开侧边栏的按钮就在里面,藏了整个就再也展不开。
 2. **收窄内容宽度** —— `layout="wide"` 会让表单拉满整个屏幕,眼睛要横扫。
 3. **卡片的边框与阴影** —— 配置项管不到 `box-shadow`。

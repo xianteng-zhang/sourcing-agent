@@ -46,9 +46,13 @@ st.set_page_config(page_title="跨境电商选品与上架 Agent", page_icon="�
 #   3. 指标卡与报告块的边框和阴影 —— 配置项管不到 box-shadow。
 _SKIN = """
 <style>
-  /* --- 1. 藏掉开发态痕迹(保留侧边栏折叠按钮,它在 header 里) --- */
+  /* --- 1. 藏掉开发态痕迹 ---
+     ⚠️ **千万不要整个隐藏 `[data-testid="stToolbar"]`。**
+     我一开始就是那么干的,结果**侧边栏一收起就再也打不开了** ——
+     因为「展开侧边栏」那个按钮(`stExpandSidebarButton`)就住在 toolbar 里面。
+     所以只藏 Deploy 和右上角的菜单,把 toolbar 本身留着。 */
   #MainMenu,
-  [data-testid="stToolbar"],
+  [data-testid="stMainMenu"],
   [data-testid="stDecoration"],
   [data-testid="stStatusWidget"],
   [data-testid="stAppDeployButton"],
