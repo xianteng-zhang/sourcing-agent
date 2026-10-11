@@ -8,8 +8,19 @@ Perplexity 都提供 OpenAI 兼容的 `/chat/completions`。差异只在
 Gemini 网页版）。那一层属于采集基建（出口、限流、反爬、账号池），不属于这里，
 硬塞进来只会把这一层搞脏。
 
-**温度故意调到 0.7。** 我们**要**观察方差 —— 同一个问题问十遍得到十个不同
-答案是这门生意的核心难题，不是 bug。把温度压到 0 会让指标好看，但那是假的。
+**温度：默认不传，而不是写死一个值。** 这是我踩过的坑 —— 一开始写死
+`temperature=0.7`，DeepSeek 收下了，换到 Kimi 直接 400：
+
+    invalid temperature: only 1 is allowed for this model
+
+因为 `kimi-k2.6` 是**思考模型**，只接受 `temperature=1`。不同厂商对这个参数的
+合法取值根本不一样，**写死任何一个值都迟早会在某家上炸**。所以默认 `None`
+= 不传这个参数，让各家用自己的默认值；真要显式指定，用
+`<PREFIX>_TEMPERATURE` 环境变量单独配。
+
+顺带一个真话：我们**要**观察方差（同一个问题问十遍得到十个不同答案是这门
+生意的核心难题）。但"要方差"不等于"能随便set温度"—— 服务端默认值通常就是
+为采样设计的，比我们拍脑袋的 0.7 更合适。
 """
 from __future__ import annotations
 
@@ -53,13 +64,15 @@ class OpenAICompatEngine:
         api_key: str,
         model: str,
         timeout: float = 60.0,
-        temperature: float = 0.7,
+        temperature: float | None = None,
     ) -> None:
         self.name = name
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        #: None = 不传 temperature,让服务端用自己的默认值。
+        #: 写死任何值都迟早会在某家上炸(Kimi 的思考模型只接受 1)。
         self.temperature = temperature
 
     def _client(self):
@@ -70,12 +83,14 @@ class OpenAICompatEngine:
 
     def ask(self, question: str, sample: int = 0) -> Answer:
         started = time.perf_counter()
+        kwargs = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": question}],
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         try:
-            resp = self._client().chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": question}],
-                temperature=self.temperature,
-            )
+            resp = self._client().chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001 - 分类后抛给 safe_ask 落成数据
             raise EngineError(_classify(exc), f"{type(exc).__name__}: {exc}") from exc
 
@@ -110,6 +125,10 @@ def from_env(prefix: str, name: str | None = None, **kwargs) -> OpenAICompatEngi
     例如 prefix="DEEPSEEK" 会读 DEEPSEEK_BASE_URL / DEEPSEEK_API_KEY /
     DEEPSEEK_MODEL。加一个引擎通常只是加三个环境变量，不用写代码。
 
+    可选第四项 `<PREFIX>_TEMPERATURE`：**不填就不传这个参数**，让服务端用
+    自己的默认值。填了会原样发出去 —— 注意各家合法取值不一样，比如 Kimi 的
+    思考模型只接受 1，填 0.7 会直接 400。所以除非你确知这一家要多少，别填。
+
     **一把 key 就能跑。** 不需要「多个 key」才能用这个模块 —— 采几个引擎
     就需要几把 key，但采一个引擎完全够把整条链路(采集 → 落库 → 口径 → 占位)
     跑通。只是那样叫「多引擎」就名不副实了。
@@ -124,6 +143,17 @@ def from_env(prefix: str, name: str | None = None, **kwargs) -> OpenAICompatEngi
             FailureKind.AUTH,
             f"{prefix}_ 缺少配置: {', '.join(missing)}",
         )
+
+    raw_temp = (os.getenv(f"{prefix}_TEMPERATURE") or "").strip()
+    if raw_temp and "temperature" not in kwargs:
+        try:
+            kwargs["temperature"] = float(raw_temp)
+        except ValueError as exc:
+            raise EngineError(
+                FailureKind.UNKNOWN,
+                f"{prefix}_TEMPERATURE 不是数字: {raw_temp!r}",
+            ) from exc
+
     return OpenAICompatEngine(name=name or prefix.lower(), base_url=base_url,
                               api_key=api_key, model=model, **kwargs)
 

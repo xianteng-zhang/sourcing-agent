@@ -683,3 +683,81 @@ def test_the_app_survives_switching_to_the_real_engine_mode(demo_engines):
     finally:
         for k in ("FAKE_BASE_URL", "FAKE_API_KEY", "FAKE_MODEL"):
             os.environ.pop(k, None)
+
+
+# ============================================================ temperature 的坑
+
+def _recording_client(sent: dict, text: str = "OK"):
+    """假 client:把 create() 收到的 kwargs 记下来,返回一个正常响应。
+
+    注意属性是**在类外挂上去的**:类体不参与闭包,`class X: create = create`
+    会 `NameError` —— 类体里的名字只在类命名空间和全局里找,看不到外层的
+    函数局部变量。
+    """
+    message = type("M", (), {"content": text})()
+    resp = type("R", (), {"choices": [type("C", (), {"message": message})()],
+                          "model": "m", "citations": None})()
+
+    def create(**kwargs):
+        sent.update(kwargs)
+        return resp
+
+    class _Completions:
+        pass
+
+    _Completions.create = staticmethod(create)
+
+    class _Chat:
+        pass
+
+    _Chat.completions = _Completions()
+
+    class _Client:
+        pass
+
+    _Client.chat = _Chat()
+    return _Client()
+
+
+def test_temperature_is_not_sent_unless_explicitly_set(monkeypatch):
+    """回归。真实跑第二个厂商时才炸出来的:
+
+        Kimi 400: invalid temperature: only 1 is allowed for this model
+
+    `kimi-k2.6` 是思考模型,只接受 temperature=1。我原先写死 0.7,
+    DeepSeek 收下了,Kimi 直接拒绝 —— **写死任何值都迟早会在某家上炸**。
+    所以默认不传,让各家用自己的默认值。
+    """
+    sent: dict = {}
+    engine = OpenAICompatEngine("x", "https://e.invalid", "k", "m")
+    monkeypatch.setattr(engine, "_client", lambda: _recording_client(sent))
+
+    got = safe_ask(engine, "q1")
+    assert got.ok
+    assert "temperature" not in sent, "默认不该把 temperature 发出去"
+
+
+def test_an_explicit_temperature_is_sent_as_is(monkeypatch):
+    sent: dict = {}
+    engine = OpenAICompatEngine("x", "https://e.invalid", "k", "m", temperature=1.0)
+    monkeypatch.setattr(engine, "_client", lambda: _recording_client(sent))
+
+    safe_ask(engine, "q1")
+    assert sent["temperature"] == 1.0
+
+
+def test_temperature_can_be_configured_per_engine(monkeypatch):
+    monkeypatch.setenv("TT_BASE_URL", "https://t.invalid/v1")
+    monkeypatch.setenv("TT_API_KEY", "sk-t")
+    monkeypatch.setenv("TT_MODEL", "m")
+
+    monkeypatch.delenv("TT_TEMPERATURE", raising=False)
+    assert from_env("TT").temperature is None
+
+    monkeypatch.setenv("TT_TEMPERATURE", "1")
+    assert from_env("TT").temperature == 1.0
+
+    monkeypatch.setenv("TT_TEMPERATURE", "不是数字")
+    with pytest.raises(EngineError) as ei:
+        from_env("TT")
+    assert "不是数字" in ei.value.detail
