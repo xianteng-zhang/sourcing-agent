@@ -34,6 +34,84 @@ from engines import (
 
 st.set_page_config(page_title="跨境电商选品与上架 Agent", page_icon="🛒", layout="wide")
 
+# ---- 界面皮肤 ----
+# 颜色 / 圆角 / 字号层级 / 状态色全部写在 `.streamlit/config.toml` 里了 ——
+# 配置项是版本稳定的,靠 CSS 选择器猜 DOM 结构一升级就会碎。
+# 这里只放**配置表达不了**的三件事:
+#
+#   1. 藏掉 Streamlit 的开发态痕迹。留着 Deploy 和 ☰,界面就在替你说「我是个 demo」。
+#   2. 收窄内容宽度。`layout="wide"` 会让表单拉满整个屏幕,眼睛要横扫。
+#   3. 指标卡与报告块的边框和阴影 —— 配置项管不到 box-shadow。
+_SKIN = """
+<style>
+  /* --- 1. 藏掉开发态痕迹(保留侧边栏折叠按钮,它在 header 里) --- */
+  #MainMenu,
+  [data-testid="stToolbar"],
+  [data-testid="stDecoration"],
+  [data-testid="stStatusWidget"],
+  [data-testid="stAppDeployButton"],
+  footer { display: none !important; }
+
+  /* --- 2. 收窄并居中。文档型界面每行 70~90 字最好读 --- */
+  [data-testid="stMainBlockContainer"] {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding-top: 1.6rem;
+    padding-bottom: 4rem;
+  }
+
+  /* --- 3. 卡片化:指标 / 报告 / 折叠面板 / 侧边栏 --- */
+  [data-testid="stMetric"] {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 0.65rem;
+    padding: 0.8rem 1rem;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+  }
+  [data-testid="stMetricLabel"] p { font-size: 0.8rem; color: #64748B; }
+
+  /* 报告用的是 st.code —— 它是这个界面的主角,给它一个安静的容器 */
+  [data-testid="stCode"] pre,
+  [data-testid="stCodeBlock"] pre {
+    border: 1px solid #E2E8F0;
+    border-radius: 0.65rem;
+    line-height: 1.6;
+  }
+
+  [data-testid="stExpander"] details {
+    border: 1px solid #E2E8F0;
+    border-radius: 0.65rem;
+    background: #FFFFFF;
+  }
+
+  [data-testid="stSidebar"] { border-right: 1px solid #E2E8F0; }
+
+  /* 标签页:去掉默认那条粗横线,改成轻描边 + 选中态上色 */
+  .stTabs [data-baseweb="tab-list"] {
+    gap: 0.15rem;
+    border-bottom: 1px solid #E2E8F0;
+  }
+  .stTabs [data-baseweb="tab"] {
+    padding: 0.35rem 0.85rem;
+    border-radius: 0.5rem 0.5rem 0 0;
+  }
+  .stTabs [aria-selected="true"] { background: #EEF2FF; }
+
+  /* --- 字体:系统 UI 字体优先,中文走苹方 / 微软雅黑 ---
+     图标字体必须显式还原,否则 Material Symbols 会退化成一串连字文字 */
+  html, body, .stApp {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  }
+  [data-testid="stIconMaterial"],
+  .material-symbols-rounded,
+  [class*="material-symbols"] {
+    font-family: "Material Symbols Rounded" !important;
+  }
+</style>
+"""
+st.markdown(_SKIN, unsafe_allow_html=True)
+
 # ---- 侧边栏 ----
 with st.sidebar:
     st.markdown("## 🛒 选品与上架 Agent")

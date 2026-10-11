@@ -324,14 +324,35 @@ python -m engines
 - **趋势分析需要能访问 Google**:`pytrends` 访问 Google Trends,国内需要系统级代理;代理关了趋势会查不到,但评论挖掘和历史记录不受影响。
 - **中文关键词趋势**:Google 上中文搜索量偏低,趋势图可能很平,英文关键词效果更好。
 - **pip 安装慢**:清华镜像对部分包返回 403,可用阿里云镜像:`pip install -i https://mirrors.aliyun.com/pypi/simple/`。
+- **改了 `config.toml` 的主题不生效?先看服务端 stderr。** 这个坑很阴:
+  `theme.baseFontSize` 要的是**整数**(`15`),写成 `"15px"` 会让 protobuf 赋值抛
+  `TypeError`,而 Streamlit 的处理方式是**整个 `[theme]` 块都不要了**,静默回落到
+  默认配色(那个 `#FF4B4B` 的红按钮)。**页面上没有任何提示**,只在服务端 stderr
+  留一条 traceback。所以主题改了没反应,第一步是去看服务端日志,不是去改 CSS。
 
 ## 界面主题
 
-配色在 `.streamlit/config.toml` 里,默认「蓝色电商风」。改几行色值即可换风格:
+配色在 `.streamlit/config.toml` 里,调色板 = slate 中性色阶 + 单一靛蓝强调色。
+
+**一条原则:能写在配置里的,就不要写进 CSS。** 配置项是版本稳定的;靠 CSS 选择器
+去猜 Streamlit 的 DOM 结构,一升级就会碎。所以颜色、圆角、字号层级、状态色
+(成功 / 警告 / 危险 / 信息)全部声明在配置里:
 
 ```toml
 [theme]
-primaryColor = "#2563EB"   # 主色
-backgroundColor = "#F8FAFC" # 页面背景
-textColor = "#0F172A"      # 文字
+primaryColor             = "#4F46E5"   # 靛蓝
+backgroundColor          = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"   # slate-50
+borderColor              = "#E2E8F0"
+textColor                = "#0F172A"
+baseRadius               = "0.65rem"   # 一个基准值派生到所有控件
+baseFontSize             = 15          # ⚠ 必须是整数
+headingFontSizes         = ["1.7rem", "1.3rem", ...]
+greenColor / yellowColor / redColor / grayColor / ...
 ```
+
+留给 CSS(`app.py` 里的 `_SKIN`)的只有**配置表达不了的三件事**:
+
+1. **藏掉开发态痕迹** —— `Deploy` / 工具栏 / 页脚。留着它,界面就在替你喊「我是 demo」。
+2. **收窄内容宽度** —— `layout="wide"` 会让表单拉满整个屏幕,眼睛要横扫。
+3. **卡片的边框与阴影** —— 配置项管不到 `box-shadow`。
