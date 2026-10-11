@@ -24,9 +24,11 @@ from engines import (
     EngineError,
     collect,
     compute,
+    format_occupancy,
     format_report,
     from_env,
     load_recordings,
+    occupancy,
     summary,
 )
 
@@ -413,19 +415,22 @@ with tab_trend:
                 st.error(f"查询失败:{exc}")
                 st.info("pytrends 偶尔会被 Google 限流,稍后重试,或换成英文关键词。")
 
-# ---------------- AI 可见度(多引擎答案采集) ----------------
+# ---------------- 类目占位 · AI 可见度(多引擎答案采集) ----------------
 with tab_geo:
-    st.header("AI 可见度")
+    st.header("类目占位 · AI 可见度")
     st.caption(
-        "把品牌问题拿去问多个 AI,统计答案里**有没有你、排第几、引了谁**。"
-        "分母只算**有效样本** —— 引擎失败不会被记成「没提到你」。"
+        "**选品前置情报**:买家直接问 AI「这个类目该买哪个」的时候,AI 推的是谁。"
+        "填一串类目问题 + 你关心的品牌,跑完就能看到 —— 推荐位被谁占了、"
+        "头部位次稳不稳、有没有你没想到的对手。"
+        "分母只算**有效样本**,引擎失败不会被记成「没提到你」。"
     )
 
     geo_mode = st.radio("引擎来源", ["🎬 录制回放(离线演示,不花钱)", "🌐 真实引擎"],
                         horizontal=True, key="geo_mode")
+    geo_demo = geo_mode.startswith("🎬")
 
     geo_engines = []
-    if geo_mode.startswith("🎬"):
+    if geo_demo:
         geo_engines = load_recordings()
         if geo_engines:
             st.caption(f"回放 engines/recordings/ 下的 {len(geo_engines)} 份录制,结果可复现。")
@@ -444,10 +449,18 @@ with tab_geo:
 
     geo_default_qs = "\n".join(sorted({q for e in geo_engines for q in e.questions}))
     geo_c1, geo_c2, geo_c3 = st.columns([2, 2, 1])
-    geo_brand = geo_c1.text_input("品牌名", value="NovaBrew" if geo_mode.startswith("🎬") else "")
+    geo_brand = geo_c1.text_input(
+        "我的品牌", value="NovaBrew" if geo_demo else "",
+        help="算它的「可见度」:提及率 / 进榜率 / 平均位次")
     geo_aliases_raw = geo_c2.text_input("别名(逗号分隔,可留空)", value="")
     geo_samples = geo_c3.number_input("每问题采样次数", min_value=1, max_value=10, value=3)
-    geo_questions_raw = st.text_area("品牌问题(每行一个)", value=geo_default_qs, height=110)
+
+    geo_rivals_raw = st.text_area(
+        "类目竞品(每行一个) —— 用来算「推荐位被谁占了」",
+        value="\n".join(["NovaBrew", "Wacaco Nanopresso", "Staresso MiNi"]) if geo_demo else "",
+        height=90,
+        help="只列你已经知道的。AI 还会推荐别的品牌,那些会单独列出来 —— 那才是你漏看的对手。")
+    geo_questions_raw = st.text_area("类目问题(每行一个)", value=geo_default_qs, height=110)
 
     if st.button("🚀 开始采集", type="primary", key="geo_run",
                  disabled=not geo_engines or not geo_brand.strip()):
@@ -474,6 +487,9 @@ with tab_geo:
             st.session_state["geo_run_id"] = geo_out["run_id"]
             st.session_state["geo_stats"] = geo_out["stats"]
             st.session_state["geo_dead"] = geo_out["dead"]
+            st.session_state["geo_answers"] = geo_out["answers"]
+            st.session_state["geo_rivals"] = [
+                r.strip() for r in geo_rivals_raw.splitlines() if r.strip()]
 
     geo_metrics = st.session_state.get("geo_metrics")
     if geo_metrics:
@@ -494,6 +510,25 @@ with tab_geo:
         if st.session_state.get("geo_dead"):
             st.warning(f"队列里彻底失败的任务:{list(st.session_state['geo_dead'])}"
                        "　(已补成失败记录,不会悄悄消失)")
+
+        geo_rivals = st.session_state.get("geo_rivals") or []
+        geo_answers = st.session_state.get("geo_answers") or []
+        if geo_rivals and geo_answers:
+            st.divider()
+            st.subheader("🧭 类目占位分析")
+            st.caption(
+                "换个问法 —— **这个类目的推荐位被谁占了?** "
+                "头部位次如果在样本间易手,说明 AI 对这个类目没有稳定偏好,那才有缝。"
+                "标 `?` 的是**没列进竞品表、但 AI 确实推荐了**的项。"
+            )
+            geo_report = occupancy(geo_answers, geo_rivals)
+            gu1, gu2, gu3 = st.columns(3)
+            gu1.metric("识别到的竞品", len(geo_report.brands))
+            gu2.metric("头部位次易手的问题",
+                       f"{len(geo_report.unstable_questions)}/{len(geo_report.by_question)}",
+                       help="第 1 位在样本间被不同品牌占过 → 这个类目没有稳定偏好")
+            gu3.metric("竞品表之外的推荐项", len(geo_report.unknown))
+            st.code(format_occupancy(geo_report, geo_rivals), language=None)
 
         for geo_m in geo_metrics:
             if not geo_m.evidence_ids:

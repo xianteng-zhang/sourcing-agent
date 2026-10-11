@@ -130,6 +130,7 @@ def demo() -> None:
 
         python -m engines
     """
+    from engines.occupancy import format_occupancy, occupancy
     from engines.replay import load_recordings
 
     engines = load_recordings()
@@ -139,6 +140,8 @@ def demo() -> None:
 
     questions = sorted({q for e in engines for q in e.questions})
     samples, brand = 3, "NovaBrew"
+    # 只是举几个「我已经知道的竞品」。AI 还会推荐别的 —— 那正是要看的东西。
+    rivals = ["NovaBrew", "Wacaco Nanopresso", "Staresso MiNi"]
     planned = _planned(engines, questions, samples)
 
     base = Path(__file__).parent.parent / "data"
@@ -153,6 +156,9 @@ def demo() -> None:
     first = collect(engines, questions, samples=samples, queue=queue, store=store)
     print(f"\n——— 第 1 轮：真实采集　run_id={first['run_id']} ———")
     print(format_report(compute(first["answers"], brand, planned=planned), brand))
+
+    print("\n——— 换个问法：这个类目的推荐位被谁占了？———")
+    print(format_occupancy(occupancy(first["answers"], rivals), rivals))
 
     counted = [_Counting(e) for e in engines]
     again = collect(counted, questions, samples=samples, run_id=first["run_id"],

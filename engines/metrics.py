@@ -58,6 +58,25 @@ def _hit(haystack: str, names: list[str]) -> bool:
     return any(n and n.lower() in low for n in names)
 
 
+def list_items(text: str) -> list[tuple[int, str]]:
+    """抽出答案里的推荐列表 → [(位次, 该条内容), ...]。
+
+    编号项用自己写的号（`2、xxx` → 2）；项目符号没有号，按出现顺序数。
+    这是「占位分析」和「提及位次」共用的唯一一处列表解析 —— 只写一遍，
+    两边的位次口径才不会打架。
+    """
+    items: list[tuple[int, str]] = []
+    bullet_order = 0
+    for line in (text or "").splitlines():
+        m = _ITEM_RE.match(line)
+        if not m:
+            continue
+        bullet_order += 1
+        items.append((int(m.group(1)) if m.group(1) else bullet_order,
+                      m.group(2).strip()))
+    return items
+
+
 def find_mention(text: str, brand: str, aliases: list[str] | None = None) -> Mention | None:
     """在一条答案里找品牌。返回 None 表示完全没提到。
 
@@ -67,15 +86,9 @@ def find_mention(text: str, brand: str, aliases: list[str] | None = None) -> Men
     names = [brand, *(aliases or [])]
     if not _hit(text or "", names):
         return None
-
-    bullet_order = 0
-    for line in (text or "").splitlines():
-        m = _ITEM_RE.match(line)
-        if not m:
-            continue
-        bullet_order += 1
-        if _hit(m.group(2), names):
-            return Mention(position=int(m.group(1)) if m.group(1) else bullet_order)
+    for position, item in list_items(text):
+        if _hit(item, names):
+            return Mention(position=position)
     return Mention(position=None)  # 提到了，但不在推荐列表里
 
 

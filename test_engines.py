@@ -31,8 +31,11 @@ from engines import (
     dump_jsonl,
     extract_citations,
     find_mention,
+    format_occupancy,
     format_report,
+    list_items,
     load_recordings,
+    occupancy,
     plan_tasks,
     safe_ask,
     summary,
@@ -481,3 +484,114 @@ def test_from_env_reports_missing_config_as_an_auth_failure(monkeypatch):
     with pytest.raises(EngineError) as ei:
         from_env("NOPE")
     assert ei.value.kind is FailureKind.AUTH
+
+
+# ============================================================ 类目占位分析
+#
+# metrics 回答「我这个品牌表现如何」，occupancy 回答「这个类目的推荐位被谁占了」。
+# 后者才是选品能用的那个，所以它的口径也要一样硬。
+
+def test_list_items_extracts_position_and_text():
+    """编号项用自己写的号，项目符号按出现顺序数 —— 位次口径只有这一处。"""
+    items = list_items("介绍:\n\n1. A — 说明\n2、B\n- C\n\n尾注")
+    assert items == [(1, "A — 说明"), (2, "B"), (3, "C")]
+
+
+def test_occupancy_maps_each_position_to_a_brand():
+    answers = [ans(text="Picks:\n\n1. Alpha\n2. Beta\n3. Gamma")]
+    q = occupancy(answers, ["Alpha", "Beta", "Gamma"]).by_question[0]
+
+    assert q.slot(1).holders == {"Alpha": 1}
+    assert q.slot(2).holders == {"Beta": 1}
+    assert q.slot(3).holders == {"Gamma": 1}
+    assert q.samples == 1
+
+
+def test_occupancy_surfaces_brands_you_did_not_put_on_the_list():
+    """最有价值的一条:你只能列出你已经知道的对手,AI 会告诉你漏掉的那些。"""
+    answers = [ans(text="1. Alpha\n2. **Stranger** — 没听过这个")]
+    r = occupancy(answers, ["Alpha"])
+
+    assert r.by_question[0].slot(2).holders == {}
+    assert r.by_question[0].slot(2).others == {"Stranger": 1}
+    assert dict(r.unknown) == {"Stranger": 1}
+
+
+def test_a_prose_mention_counts_as_mentioned_but_not_ranked():
+    answers = [ans(text="Alpha is decent, though I would not put it on a list.")]
+    share = occupancy(answers, ["Alpha"]).brands[0]
+
+    assert (share.mentioned, share.ranked) == (1, 0)
+    assert share.avg_position is None
+
+
+def test_occupancy_skips_failed_samples():
+    """和 metrics 同一条口径:引擎超时不等于「这个位次不存在」。"""
+    answers = [
+        ans(sample=0, text="1. Alpha", error=FailureKind.TIMEOUT),
+        ans(sample=1, text="1. Alpha"),
+    ]
+    r = occupancy(answers, ["Alpha"])
+
+    assert r.samples == 1, "失败样本混进了占位统计"
+    assert r.brands[0].ranked == 1
+
+
+def test_a_longer_brand_name_is_not_stolen_by_its_prefix():
+    """先匹配长的:否则「Wacaco」会把「Wacaco Nanopresso」抢走,一个品牌被拆成两半。"""
+    answers = [ans(text="1. Wacaco Nanopresso")]
+    by = {s.brand: s for s in occupancy(answers, ["Wacaco", "Wacaco Nanopresso"]).brands}
+
+    assert by["Wacaco Nanopresso"].ranked == 1
+    assert by["Wacaco"].ranked == 0
+
+
+def test_an_unstable_head_slot_is_flagged():
+    swapped = [ans(sample=0, text="1. Alpha\n2. Beta"),
+               ans(sample=1, text="1. Beta\n2. Alpha")]
+    q = occupancy(swapped, ["Alpha", "Beta"]).by_question[0]
+    assert q.unstable_head is True
+    assert q.head.holders == {"Alpha": 1, "Beta": 1}
+
+    steady = [ans(sample=i, text="1. Alpha\n2. Beta") for i in range(3)]
+    assert occupancy(steady, ["Alpha", "Beta"]).by_question[0].unstable_head is False
+
+
+def test_an_unrecognised_brand_at_slot_one_also_makes_the_head_unstable():
+    """没认出来的对手占过第 1 位,头部位次同样是易手的 —— 不能因为认不出就当它不存在。"""
+    answers = [ans(sample=0, text="1. Alpha"), ans(sample=1, text="1. Stranger")]
+    assert occupancy(answers, ["Alpha"]).by_question[0].unstable_head is True
+
+
+def test_a_brand_listed_twice_in_one_answer_is_ranked_once():
+    answers = [ans(text="1. Alpha — 首选\n2. Beta\n3. Alpha — 备选")]
+    r = occupancy(answers, ["Alpha", "Beta"])
+    alpha = {s.brand: s for s in r.brands}["Alpha"]
+
+    assert alpha.ranked == 1, "同一条答案里出现两次,进榜只能算一次"
+    assert alpha.positions == [1]
+    assert r.by_question[0].slot(3).holders == {"Alpha": 1}, "但占位表两个位次都要算"
+
+
+def test_occupancy_on_the_demo_recordings(demo_engines, queue, store):
+    """演示数据的数字写在文档里,改录制必须同步改文档。"""
+    questions = sorted({q for e in demo_engines for q in e.questions})
+    out = collect(demo_engines, questions, samples=3, queue=queue, store=store)
+
+    rivals = ["NovaBrew", "Wacaco Nanopresso", "Staresso MiNi"]
+    r = occupancy(out["answers"], rivals)
+
+    assert r.samples == 10
+    by = {s.brand: s for s in r.brands}
+    assert (by["Wacaco Nanopresso"].mentioned, by["Wacaco Nanopresso"].ranked) == (10, 6)
+    assert (by["NovaBrew"].mentioned, by["NovaBrew"].ranked, by["NovaBrew"].top1) == (7, 6, 2)
+    assert by["Staresso MiNi"].ranked == 1
+    assert dict(r.unknown) == {"AeroPress Go": 3, "Outin Nano": 2}
+
+    # 两个问题的头部位次都在样本间易手 —— 演示数据本身就该是个「有缝」的类目
+    assert len(r.unstable_questions) == 2
+
+    text = format_occupancy(r, rivals)
+    assert "AeroPress Go" in text, "漏看的对手必须出现在报告里"
+    assert "没有稳定偏好" in text
+    assert "?Outin Nano" in text, "没认出来的项在占位表里要带 ? 标出来"
